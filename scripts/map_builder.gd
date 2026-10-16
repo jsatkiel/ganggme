@@ -1234,13 +1234,21 @@ func _grass() -> void:
 	mat.shader = preload("res://scripts/grass.gdshader")
 	mat.set_shader_parameter("clump", preload("res://assets/nature/grass_clump.png"))
 	card.surface_set_material(0, mat)
+	# the base layer reaches the horizon; a denser layer with long clumps mixed in only draws near the
+	# camera, where it shows (cut-out cards are what cost the most on a laptop GPU)
+	var total := _grass_layer(r, card, 34000, 0.0, 140.0)
+	total += _grass_layer(r, card, 55000, 0.35, 70.0)
+	print("[map] grass clumps: ", total)
+
+
+func _grass_layer(r: RandomNumberGenerator, card: Mesh, tries: int, long_share: float, draw_range: float) -> int:
 	var xforms: Array[Transform3D] = []
 	var shades: Array[Color] = []
-	for i in 34000:
+	for i in tries:
 		var p := Vector2(r.randf_range(-88, 88), r.randf_range(-80, 65))
 		if _in_lot(p) or _is_blocked(p, 0.5) or _is_blocked(p, 0.4, _clear) or _is_blocked(p, 0.4, _bldg) or p.y > 64.5: # never on concrete (walkways, building aprons, street sidewalks)
 			continue
-		var size := r.randf_range(0.45, 0.85)
+		var size := r.randf_range(0.9, 1.4) if r.randf() < long_share else r.randf_range(0.45, 0.85)
 		var basis := Basis(Vector3.UP, r.randf() * TAU).scaled(Vector3(size * r.randf_range(0.9, 1.4), size, size * r.randf_range(0.9, 1.4)))
 		xforms.append(Transform3D(basis, Vector3(p.x, -0.02, p.y)))
 		var s := r.randf_range(0.75, 1.1) # some clumps greener, some dried out
@@ -1256,9 +1264,9 @@ func _grass() -> void:
 	var mmi := MultiMeshInstance3D.new()
 	mmi.multimesh = mm
 	mmi.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_OFF
-	mmi.visibility_range_end = 140.0
+	mmi.visibility_range_end = draw_range
 	add_child(mmi)
-	print("[map] grass clumps: ", xforms.size())
+	return xforms.size()
 
 
 const SNOW_PILE := preload("res://assets/props/snowpile/snowpile.fbx")
