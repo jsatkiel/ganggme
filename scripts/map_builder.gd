@@ -1350,34 +1350,72 @@ func _grass() -> void:
 	# camera, where it shows (cut-out cards are what cost the most on a laptop GPU)
 	var total := _grass_layer(r, card, 34000, 0.0, 140.0)
 	total += _grass_layer(r, card, 55000, 0.35, 70.0)
+	# low turf (tools/make_short_grass.py) carpeting the lawns between the clumps: ankle high at most,
+	# so it fills the ground without hiding anyone. Too small to see far off, so it only draws close by.
+	# One card each, turned to face the camera in the shader, so the short cards never read as X shapes.
+	st.begin(Mesh.PRIMITIVE_TRIANGLES)
+	var quad := [[Vector3(-0.5, 0, 0), Vector2(0, 1)], [Vector3(0.5, 0, 0), Vector2(1, 1)], [Vector3(0.5, 1, 0), Vector2(1, 0)], [Vector3(-0.5, 1, 0), Vector2(0, 0)]]
+	for idx in [0, 1, 2, 0, 2, 3]:
+		st.set_uv(quad[idx][1])
+		st.set_normal(Vector3.UP)
+		st.add_vertex(quad[idx][0])
+	var turf := st.commit()
+	var turf_mat := ShaderMaterial.new()
+	turf_mat.shader = preload("res://scripts/grass_turf.gdshader")
+	turf_mat.set_shader_parameter("clump", preload("res://assets/nature/grass_short.png"))
+	turf.surface_set_material(0, turf_mat)
+	total += _grass_layer(r, turf, 120000, 0.0, 50.0, true)
 	print("[map] grass clumps: ", total)
 
 
-func _grass_layer(r: RandomNumberGenerator, card: Mesh, tries: int, long_share: float, draw_range: float) -> int:
+const GRASS_TILE := 24.0
+
+
+func _grass_layer(r: RandomNumberGenerator, card: Mesh, tries: int, long_share: float, draw_range: float, low := false) -> int:
 	var xforms: Array[Transform3D] = []
 	var shades: Array[Color] = []
 	for i in tries:
 		var p := Vector2(r.randf_range(-88, 88), r.randf_range(-80, 65))
 		if _in_lot(p) or _is_blocked(p, 0.5) or _is_blocked(p, 0.4, _clear) or _is_blocked(p, 0.4, _bldg) or p.y > 64.5: # never on concrete (walkways, building aprons, street sidewalks)
 			continue
-		var size := r.randf_range(0.9, 1.4) if r.randf() < long_share else r.randf_range(0.45, 0.85)
-		var basis := Basis(Vector3.UP, r.randf() * TAU).scaled(Vector3(size * r.randf_range(0.9, 1.4), size, size * r.randf_range(0.9, 1.4)))
-		xforms.append(Transform3D(basis, Vector3(p.x, -0.02, p.y)))
+		var basis: Basis
+		if low:
+			var h := r.randf_range(0.14, 0.3) # 14-30 cm, about 10-25 cm showing above the snow
+			var w := h * r.randf_range(1.7, 2.3) # close to the texture's 2:1 so blades aren't squashed
+			basis = Basis(Vector3.UP, r.randf() * TAU).scaled(Vector3(w, h, w))
+		else:
+			var size := r.randf_range(0.9, 1.4) if r.randf() < long_share else r.randf_range(0.45, 0.85)
+			basis = Basis(Vector3.UP, r.randf() * TAU).scaled(Vector3(size * r.randf_range(0.9, 1.4), size, size * r.randf_range(0.9, 1.4)))
+		# turf is sunk a little so the dense band at the roots stays under the snow
+		xforms.append(Transform3D(basis, Vector3(p.x, -basis.y.length() * 0.15 if low else -0.02, p.y)))
 		var s := r.randf_range(0.75, 1.1) # some clumps greener, some dried out
 		shades.append(Color(s, s * r.randf_range(0.92, 1.05), s * 0.9))
-	var mm := MultiMesh.new()
-	mm.transform_format = MultiMesh.TRANSFORM_3D
-	mm.use_custom_data = true
-	mm.mesh = card
-	mm.instance_count = xforms.size()
+	# split into tiles so each one is culled and range-checked on its own (a single map-wide MultiMesh is
+	# measured from the map's center, so a short draw range would hide it everywhere else)
+	var tiles := {}
 	for i in xforms.size():
-		mm.set_instance_transform(i, xforms[i])
-		mm.set_instance_custom_data(i, shades[i])
-	var mmi := MultiMeshInstance3D.new()
-	mmi.multimesh = mm
-	mmi.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_OFF
-	mmi.visibility_range_end = draw_range
-	add_child(mmi)
+		var key := Vector2i(floori(xforms[i].origin.x / GRASS_TILE), floori(xforms[i].origin.z / GRASS_TILE))
+		if not tiles.has(key):
+			tiles[key] = []
+		tiles[key].append(i)
+	for key: Vector2i in tiles:
+		var center := Vector3((key.x + 0.5) * GRASS_TILE, 0, (key.y + 0.5) * GRASS_TILE)
+		var list: Array = tiles[key]
+		var mm := MultiMesh.new()
+		mm.transform_format = MultiMesh.TRANSFORM_3D
+		mm.use_custom_data = true
+		mm.mesh = card
+		mm.instance_count = list.size()
+		for k in list.size():
+			var xf: Transform3D = xforms[list[k]]
+			mm.set_instance_transform(k, Transform3D(xf.basis, xf.origin - center))
+			mm.set_instance_custom_data(k, shades[list[k]])
+		var mmi := MultiMeshInstance3D.new()
+		mmi.multimesh = mm
+		mmi.position = center
+		mmi.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_OFF
+		mmi.visibility_range_end = draw_range
+		add_child(mmi)
 	return xforms.size()
 
 
