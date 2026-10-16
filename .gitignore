@@ -1,0 +1,7 @@
+# Godot cache (rebuilt on import)
+.godot/
+*.import.tmp
+# raw downloaded archives (the usable files are copied into assets/)
+assets/_downloads/
+# dev screenshots
+/shot*.png

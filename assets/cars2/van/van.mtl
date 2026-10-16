@@ -1,0 +1,12 @@
+newmtl Textures_Body_1
+map_Kd body1.png
+newmtl Textures_Body_2
+map_Kd body2.png
+newmtl Texture_inside
+map_Kd inside.png
+newmtl Textures_wheel
+map_Kd wheel.png
+newmtl Glass_Light
+Kd 0.07 0.07 0.07
+newmtl Glass_
+Kd 0.09 0.09 0.09
