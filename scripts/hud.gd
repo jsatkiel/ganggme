@@ -79,6 +79,7 @@ var score_label: Label
 var center_label: Label
 var hint_label: Label
 var killfeed_box: VBoxContainer
+var fps_label: Label
 var _vignette_flash := 0.0
 var _health := 100.0
 var _center_t := 0.0
@@ -147,6 +148,10 @@ func _ready() -> void:
 	tw.tween_interval(12.0)
 	tw.tween_property(hint_label, "modulate:a", 0.0, 1.5)
 
+	fps_label = _label(16, HORIZONTAL_ALIGNMENT_LEFT) # frame rate in the corner, for checking performance on the laptop
+	fps_label.position = Vector2(8, 4)
+	fps_label.modulate = Color(1, 1, 1, 0.8)
+
 	killfeed_box = VBoxContainer.new()
 	killfeed_box.set_anchors_preset(Control.PRESET_TOP_RIGHT)
 	killfeed_box.offset_left = -520
@@ -175,6 +180,7 @@ func _label(font_size: int, align: HorizontalAlignment) -> Label:
 
 
 func _process(delta: float) -> void:
+	fps_label.text = "%d FPS" % Engine.get_frames_per_second()
 	_vignette_flash = move_toward(_vignette_flash, 0.0, delta * 1.5)
 	var low := clampf(1.0 - _health / 100.0, 0.0, 1.0)
 	vignette.color.a = clampf(low * 0.45 + _vignette_flash, 0.0, 0.7)

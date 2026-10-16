@@ -145,7 +145,10 @@ func _build_environment() -> void:
 	sun.light_energy = 0.85
 	sun.light_color = Color(1.0, 0.96, 0.9)
 	sun.shadow_enabled = true
-	sun.directional_shadow_max_distance = 140.0
+	# 2 cascades out to 80 m: every caster is drawn once per cascade, and 4 out to 140 m tripled the
+	# draw calls, which a laptop CPU/GPU (940MX) can't keep up with
+	sun.directional_shadow_mode = DirectionalLight3D.SHADOW_PARALLEL_2_SPLITS
+	sun.directional_shadow_max_distance = 80.0
 	add_child(sun)
 
 

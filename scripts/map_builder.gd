@@ -920,7 +920,7 @@ func _backdrop() -> void:
 	r.seed = 7171
 	var placed := {} # pack piece + "|shadow"/"|flat" -> Array[Transform3D]
 	# street across from the gate: fronts on the far sidewalk (z 89), facing the gate
-	_shop_row(r, placed, Vector3(0, 0, 89.3), Vector3.RIGHT, 130.0, true)
+	_shop_row(r, placed, Vector3(0, 0, 89.3), Vector3.RIGHT, 130.0, false) # no shadows: cheaper on laptop GPUs
 	# behind the fences: north, and west (east is its mirror image)
 	_shop_row(r, placed, Vector3(0, 0, -95.0), Vector3.RIGHT, 130.0, false)
 	_shop_row(r, placed, Vector3(-101.0, 0, -4.0), Vector3.BACK, 88.0, false) # stops short of the north row and the street
@@ -1348,8 +1348,8 @@ func _grass() -> void:
 	card.surface_set_material(0, mat)
 	# the base layer reaches the horizon; a denser layer with long clumps mixed in only draws near the
 	# camera, where it shows (cut-out cards are what cost the most on a laptop GPU)
-	var total := _grass_layer(r, card, 26000, 0.0, 140.0)
-	total += _grass_layer(r, card, 16000, 0.35, 70.0)
+	var total := _grass_layer(r, card, 26000, 0.0, 100.0)
+	total += _grass_layer(r, card, 16000, 0.35, 45.0)
 	# low turf (tools/make_short_grass.py) carpeting the lawns between the clumps: ankle high at most,
 	# so it fills the ground without hiding anyone. Too small to see far off, so it only draws close by.
 	# One card each, turned to face the camera in the shader, so the short cards never read as X shapes.
@@ -1364,7 +1364,7 @@ func _grass() -> void:
 	turf_mat.shader = preload("res://scripts/grass_turf.gdshader")
 	turf_mat.set_shader_parameter("clump", preload("res://assets/nature/grass_short.png"))
 	turf.surface_set_material(0, turf_mat)
-	total += _grass_layer(r, turf, 45000, 0.0, 50.0, true)
+	total += _grass_layer(r, turf, 45000, 0.0, 30.0, true)
 	print("[map] grass clumps: ", total)
 
 
