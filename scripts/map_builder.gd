@@ -40,15 +40,11 @@ var bot_spawns: Array[Vector3] = []
 var waypoints: Array[Vector3] = []
 
 var _blocked: Array = [] # [center: Vector2, half_size: Vector2, yaw: float]
-var _windows: Array[Transform3D] = []
-var _frames: Array[Transform3D] = []
 var _boards: Array[Transform3D] = []
-var _acs: Array[Transform3D] = []
 var _pickets: Array[Transform3D] = []
 var _posts: Array[Transform3D] = []
 var _car_mats := {}
 
-var m_brick: StandardMaterial3D
 var m_brick2: StandardMaterial3D
 var m_concrete: StandardMaterial3D
 var m_sidewalk: StandardMaterial3D
@@ -61,8 +57,6 @@ var m_iron: StandardMaterial3D
 var m_glass: StandardMaterial3D
 var m_frame: StandardMaterial3D
 var m_board: StandardMaterial3D
-var m_ac: StandardMaterial3D
-var m_door: StandardMaterial3D
 var m_bark: StandardMaterial3D
 var m_yellow: StandardMaterial3D
 var m_orange: StandardMaterial3D
@@ -187,7 +181,6 @@ func _pbr_set(diff: String, nor: String, rough: String, scale: Vector3, tint := 
 
 
 func _make_materials() -> void:
-	m_brick = _pbr("red_brick_03", 0.33, Color(1.0, 0.72, 0.62))
 	m_brick2 = _pbr("red_brick_03", 0.33, Color(0.92, 0.66, 0.58))
 	m_concrete = _pbr("concrete_floor_02", 0.35, Color(0.95, 0.94, 0.92))
 	m_sidewalk = _pbr_set("sidewalk02_diff.png", "sidewalk02_nor.png", "sidewalk02_rough.png", Vector3(0.5, 0.5, 0.5))
@@ -201,8 +194,6 @@ func _make_materials() -> void:
 	m_glass.metallic = 0.4
 	m_frame = _mat(Color(0.82, 0.8, 0.75))
 	m_board = _mat(Color(0.6, 0.48, 0.32), 0.3, 0.5)
-	m_ac = _mat(Color(0.78, 0.77, 0.72), 0.3, 0.6)
-	m_door = _mat(Color(0.18, 0.15, 0.13), 0.2, 0.5)
 	m_bark = _pbr("bark_brown_02", 0.9, Color(0.62, 0.6, 0.58))
 	m_bark.uv1_world_triplanar = false
 	m_bark.cull_mode = BaseMaterial3D.CULL_DISABLED
@@ -424,52 +415,174 @@ func _flat_poly(pts: PackedVector2Array, y: float, mat: Material) -> void:
 
 
 func _building(cx: float, cz: float, sx: float, sz: float, floors: int, tower: bool, yaw_deg := 0.0) -> void:
+	# walls tiled from the Downtown City MegaKit (Quaternius, CC0): 2 m wide, 3 m tall pieces, stretched a
+	# little so each face holds a whole, odd number of them (a door piece lands dead center) and floors are FLOOR_H.
 	var by := deg_to_rad(yaw_deg)
 	var c := Vector3(cx, 0, cz)
 	var h := floors * FLOOR_H + 0.6
-	add_box(c + Vector3(0, h / 2.0, 0), Vector3(sx, h, sz), m_brick if tower else m_brick2, true, by)
+	var root := Node3D.new()
+	root.position = c
+	root.rotation.y = by
+	add_child(root)
 	_block(Vector2(cx, cz), Vector2(sx, sz), by)
 	_bldg.append([Vector2(cx, cz), Vector2(sx + 3.9, sz + 3.9) / 2.0, by]) # footprint incl. concrete apron
-	add_box(c + Vector3(0, h + 0.2, 0), Vector3(sx + 0.3, 0.4, sz + 0.3), m_concrete, false, by) # roof cap
-	add_box(c + Vector3(0, 0.4, 0), Vector3(sx + 0.1, 0.8, sz + 0.1), m_concrete, false, by) # base course
+	add_box(Vector3(0, h + 0.2, 0), Vector3(sx + 0.3, 0.4, sz + 0.3), m_concrete, false, 0.0, root) # roof cap
+	add_box(Vector3(0, 0.125, 0), Vector3(sx + 0.1, 0.25, sz + 0.1), m_concrete, false, 0.0, root) # base course, under the ground-floor sills
 	if tower:
 		for f in range(1, floors):
-			add_box(c + Vector3(0, f * FLOOR_H, 0), Vector3(sx + 0.14, 0.26, sz + 0.14), m_concrete, false, by)
+			add_box(Vector3(0, f * FLOOR_H, 0), Vector3(sx + 0.14, 0.26, sz + 0.14), m_concrete, false, 0.0, root)
 	add_box(c + Vector3(0, 0.03, 0), Vector3(sx + 4, 0.06, sz + 4), m_sidewalk, false, by) # apron
+	# the kit pieces don't cast shadows (too heavy on a laptop GPU); this plain box does it for them
+	var shadow := add_box(Vector3(0, h / 2.0, 0), Vector3(sx - 0.1, h, sz - 0.1), m_concrete, false, 0.0, root)
+	shadow.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_SHADOWS_ONLY
 
-	for face in 4:
+	# random details come from a seed shared with the mirror-image building, and are laid out in that
+	# building's frame (faces 2/3 swap, columns run backwards) so the pair stays an exact mirror
+	var r := RandomNumberGenerator.new()
+	r.seed = int(absf(cx) * 1000.0 + cz * 7.0)
+	var flip := cx > 0.0
+	var ys := FLOOR_H / 3.0
+	var pieces := {} # kit piece -> Array[Transform3D] (building-local)
+	var shell := PackedVector3Array() # collision triangles on the wall faces, open where the windows are
+	for fc in 4:
+		var face: int = [0, 1, 3, 2][fc] if flip else fc
 		var along := sx if face < 2 else sz
-		var yaw: float = by + [0.0, PI, PI / 2, -PI / 2][face]
-		var basis := Basis(Vector3.UP, yaw)
-		var center := c + basis * Vector3(0, 0, (sz if face < 2 else sx) / 2.0)
-		var cols := int((along - 1.5) / 2.6)
-		var start := -float(cols - 1) * 2.6 / 2.0
+		var depth := sz if face < 2 else sx
+		var basis := Basis(Vector3.UP, [0.0, PI, PI / 2, -PI / 2][face])
+		var n := 2 * roundi((along / 2.0 - 1.0) / 2.0) + 1
+		var w := along / n
+		var xs := w / 2.0
+		var openings: Array[float] = [] # centers of the window openings on this face
 		for f in floors:
-			for col in cols:
-				var o := start + col * 2.6
-				var is_door := f == 0 and absf(o) < 1.4
-				var p := center + basis * Vector3(o, f * FLOOR_H + (1.25 if is_door else 1.75), 0)
-				if is_door:
-					add_box(p + basis * Vector3(0, 0, 0.05), Vector3(1.8, 2.4, 0.15), m_door, false, yaw)
-					add_box(p + basis * Vector3(0, 1.4, 0.5), Vector3(2.6, 0.15, 1.2), m_concrete, false, yaw)
+			for ic in n:
+				var i := n - 1 - ic if flip else ic
+				var o := -along / 2.0 + w * (i + 0.5)
+				var at := Transform3D(basis, basis * Vector3(o, f * FLOOR_H, depth / 2.0))
+				var xf := at * Transform3D(Basis.from_scale(Vector3(xs, ys, 1.0)), Vector3.ZERO)
+				var corner := ic == 0 or ic == n - 1
+				if f == 0 and ic == n / 2:
+					# entrance: steel door in a plain brick bay under a concrete canopy
+					_piece(pieces, "Brick_BottomTrim", xf)
+					_piece(pieces, "Door_1", at * Transform3D(Basis(), Vector3(0.5, 0.0, 0.05)))
+					var canopy := at * Transform3D(Basis(), Vector3(0, 2.55, 0.6))
+					add_box(canopy.origin, Vector3(2.4, 0.15, 1.2), m_concrete, false, basis.get_euler().y, root)
 					continue
-				_frames.append(Transform3D(basis, p + basis * Vector3(0, 0, 0.02)))
-				if rng.randf() < 0.07:
-					_boards.append(Transform3D(basis, p + basis * Vector3(0, 0, 0.06)))
-				else:
-					_windows.append(Transform3D(basis, p + basis * Vector3(0, 0, 0.04)))
-				if f >= 1 and rng.randf() < 0.22:
-					_acs.append(Transform3D(basis, p + basis * Vector3(0, -0.85, 0.28)))
-	# graffiti on the low walk-ups
+				if corner:
+					_piece(pieces, "Brick_BottomTrim" if f == 0 else "Brick_Plain_3", xf)
+					continue
+				_piece(pieces, WIN, xf)
+				if f == 1:
+					openings.append(o)
+				if r.randf() < 0.07:
+					_boards.append(root.transform * at * Transform3D(Basis.from_scale(Vector3(WIN_GLASS.size.x * xs + 0.12, WIN_GLASS.size.y * ys + 0.12, 1.0) / Vector3(1.35, 1.55, 1.0)), Vector3(0, WIN_GLASS.get_center().y * ys, -0.12)))
+				elif f >= 1 and r.randf() < 0.22:
+					_piece(pieces, "Prop_ACUnit", at * Transform3D(Basis(), Vector3(-0.04, WIN_GLASS.position.y * ys, -0.06)))
+		# parapet above the top floor
+		for ic in n:
+			var o := -along / 2.0 + w * (ic + 0.5)
+			_piece(pieces, "Brick_Plain_1", Transform3D(basis, basis * Vector3(o, floors * FLOOR_H, depth / 2.0)) * Transform3D(Basis.from_scale(Vector3(xs, 0.6, 1.0)), Vector3.ZERO))
+		_wall_shell(shell, basis, along, depth, xs, floors, h, openings)
+	for key in pieces:
+		var mmi := MultiMeshInstance3D.new()
+		var mm := MultiMesh.new()
+		mm.transform_format = MultiMesh.TRANSFORM_3D
+		mm.mesh = _kit_mesh(key)
+		var list: Array = pieces[key]
+		mm.instance_count = list.size()
+		for k in list.size():
+			mm.set_instance_transform(k, list[k])
+		mmi.multimesh = mm
+		mmi.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_OFF
+		root.add_child(mmi)
+
+	# collision: the solid core is set back to the glass, and a thin shell covers the brick in front of it,
+	# so bullet holes land right on the brick or right on the glass instead of floating in the window recess
+	var body := StaticBody3D.new()
+	body.collision_layer = 1
+	body.collision_mask = 0
+	var core := CollisionShape3D.new()
+	var bs := BoxShape3D.new()
+	bs.size = Vector3(sx - WIN_DEPTH * 2.0, h, sz - WIN_DEPTH * 2.0)
+	core.shape = bs
+	core.position.y = h / 2.0
+	body.add_child(core)
+	var cs := CollisionShape3D.new()
+	var cps := ConcavePolygonShape3D.new()
+	cps.backface_collision = true
+	cps.set_faces(shell)
+	cs.shape = cps
+	body.add_child(cs)
+	root.add_child(body)
+
+	# graffiti on the low walk-ups (mirrored with the other side's building like the rest)
 	if not tower:
 		for i in 2:
-			var face := rng.randi() % 4
+			var fc := r.randi() % 4
+			var face: int = [0, 1, 3, 2][fc] if flip else fc
 			var yaw: float = by + [0.0, PI, PI / 2, -PI / 2][face]
 			var basis := Basis(Vector3.UP, yaw)
 			var along := sx if face < 2 else sz
 			var center := c + basis * Vector3(0, 0, (sz if face < 2 else sx) / 2.0 + 0.09)
-			var p := center + basis * Vector3(rng.randf_range(-along / 2 + 3, along / 2 - 3), 1.7, 0)
-			_tag(p, yaw, TAGS[rng.randi() % TAGS.size()], rng.randf_range(0.8, 1.4))
+			var o := r.randf_range(-along / 2 + 3, along / 2 - 3)
+			var p := center + basis * Vector3(-o if flip else o, 1.7, 0)
+			_tag(p, yaw, TAGS[r.randi() % TAGS.size()], r.randf_range(0.8, 1.4))
+
+
+const KIT := "res://assets/citykit/%s.gltf"
+const WIN := "Brick_Window_Trim"
+const WIN_GLASS := Rect2(-0.55, 0.28, 1.1, 2.08) # window opening in the unscaled piece (x, y), a little past the glass
+const WIN_DEPTH := 0.2 # how far the glass sits back from the wall face
+var _kit_cache := {}
+
+
+func _piece(pieces: Dictionary, key: String, xf: Transform3D) -> void:
+	if not pieces.has(key):
+		pieces[key] = []
+	pieces[key].append(xf)
+
+
+func _kit_mesh(key: String) -> Mesh:
+	# a kit piece's mesh without the inside-of-the-room surfaces (never seen behind opaque glass), glass made opaque
+	if _kit_cache.has(key):
+		return _kit_cache[key]
+	var scene: Node = load(KIT % key).instantiate()
+	var src: MeshInstance3D = scene.find_children("*", "MeshInstance3D", true, false)[0]
+	var mesh: ArrayMesh = src.mesh.duplicate()
+	scene.free()
+	for s in range(mesh.get_surface_count() - 1, -1, -1):
+		var m := mesh.surface_get_material(s)
+		var mname := m.resource_name if m else ""
+		if mname in ["MI_InteriorWall", "MI_FakeInterior"]:
+			mesh.surface_remove(s)
+		elif mname == "MI_Glass":
+			mesh.surface_set_material(s, m_glass)
+	_kit_cache[key] = mesh
+	return mesh
+
+
+func _wall_shell(tris: PackedVector3Array, basis: Basis, along: float, depth: float, xs: float, floors: int, h: float, openings: Array[float]) -> void:
+	# collision quads on one wall face (building-local), leaving holes where the window openings are
+	# (the middle bay of the ground floor is the door, not a window)
+	var ys := FLOOR_H / 3.0
+	var hw := WIN_GLASS.size.x / 2.0 * xs
+	var y0 := WIN_GLASS.position.y * ys
+	var y1 := WIN_GLASS.end.y * ys
+	var quad := func(xa: float, xb: float, ya: float, yb: float) -> void:
+		var p := [Vector3(xa, ya, depth / 2.0), Vector3(xb, ya, depth / 2.0), Vector3(xb, yb, depth / 2.0), Vector3(xa, yb, depth / 2.0)]
+		for k in [0, 1, 2, 0, 2, 3]:
+			tris.append(basis * p[k])
+	for f in floors:
+		var base := f * FLOOR_H
+		quad.call(-along / 2.0, along / 2.0, base, base + y0)
+		quad.call(-along / 2.0, along / 2.0, base + y1, base + FLOOR_H)
+		var x := -along / 2.0
+		for o in openings:
+			if f == 0 and absf(o) < 0.01:
+				continue
+			quad.call(x, o - hw, base + y0, base + y1)
+			x = o + hw
+		quad.call(x, along / 2.0, base + y0, base + y1)
+	quad.call(-along / 2.0, along / 2.0, floors * FLOOR_H, h)
 
 
 func _entrance() -> void:
@@ -822,10 +935,7 @@ func _bounds() -> void:
 
 
 func _flush_multimeshes() -> void:
-	_multimesh(Vector3(1.3, 1.5, 0.12), m_glass, _windows)
-	_multimesh(Vector3(1.5, 1.7, 0.08), m_frame, _frames)
 	_multimesh(Vector3(1.35, 1.55, 0.06), m_board, _boards)
-	_multimesh(Vector3(0.75, 0.5, 0.55), m_ac, _acs)
 	_multimesh(Vector3(0.035, 1.0, 0.035), m_iron, _pickets)
 	_multimesh(Vector3(0.1, 1.0, 0.1), m_iron, _posts)
 
