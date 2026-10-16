@@ -45,7 +45,6 @@ var _pickets: Array[Transform3D] = []
 var _posts: Array[Transform3D] = []
 var _car_mats := {}
 
-var m_brick2: StandardMaterial3D
 var m_concrete: StandardMaterial3D
 var m_sidewalk: StandardMaterial3D
 var m_curb: StandardMaterial3D
@@ -64,7 +63,6 @@ var m_paint: StandardMaterial3D
 var m_dumpster: StandardMaterial3D
 var m_tire: StandardMaterial3D
 var m_bag: StandardMaterial3D
-var m_backdrop: StandardMaterial3D
 var m_lawn: StandardMaterial3D
 var m_leaves: StandardMaterial3D
 
@@ -181,7 +179,6 @@ func _pbr_set(diff: String, nor: String, rough: String, scale: Vector3, tint := 
 
 
 func _make_materials() -> void:
-	m_brick2 = _pbr("red_brick_03", 0.33, Color(0.92, 0.66, 0.58))
 	m_concrete = _pbr("concrete_floor_02", 0.35, Color(0.95, 0.94, 0.92))
 	m_sidewalk = _pbr_set("sidewalk02_diff.png", "sidewalk02_nor.png", "sidewalk02_rough.png", Vector3(0.5, 0.5, 0.5))
 	m_asphalt = _pbr("asphalt_01", 0.22, Color(0.8, 0.8, 0.8))
@@ -203,7 +200,6 @@ func _make_materials() -> void:
 	m_dumpster = _mat(Color(0.12, 0.25, 0.16), 0.4, 0.4)
 	m_tire = _mat(Color(0.05, 0.05, 0.05))
 	m_bag = _mat(Color(0.03, 0.03, 0.03), 0.0, 1.0, 0.35)
-	m_backdrop = _mat(Color(0.45, 0.33, 0.28), 0.3, 0.05)
 	m_lawn = _pbr_set("snow_diff.png", "snow_nor.png", "snow_rough.png", Vector3(0.2, 0.2, 0.2), Color(0.76, 0.77, 0.8)) # snowy strips by the doors, a touch more trampled
 	m_leaves = _mat(Color(0.16, 0.24, 0.12), 0.0, 1.0, 0.9)
 
@@ -917,14 +913,130 @@ func _tree(x: float, z: float, height: float) -> void:
 
 
 func _backdrop() -> void:
-	# neighborhood skyline beyond the fences (not reachable)
-	for i in 40:
-		var ang := float(i) / 40.0 * TAU
-		var dist := rng.randf_range(140, 180)
-		var w := rng.randf_range(12, 26)
-		var h := rng.randf_range(8, 30)
-		var pos := Vector3(cos(ang) * dist, h / 2.0, sin(ang) * dist)
-		add_box(pos, Vector3(w, h, rng.randf_range(10, 20)), m_backdrop if rng.randf() < 0.6 else m_brick2, false, -ang)
+	# the neighborhood around the block, from the user's city pack: old brick storefronts lining the street
+	# across from the gate and standing just outside the other three fences, high-rises and panel blocks
+	# further out. All in mirrored pairs; pieces only ever face the block.
+	var r := RandomNumberGenerator.new()
+	r.seed = 7171
+	var placed := {} # pack piece + "|shadow"/"|flat" -> Array[Transform3D]
+	# street across from the gate: fronts on the far sidewalk (z 89), facing the gate
+	_shop_row(r, placed, Vector3(0, 0, 89.3), Vector3.RIGHT, 130.0, true)
+	# behind the fences: north, and west (east is its mirror image)
+	_shop_row(r, placed, Vector3(0, 0, -95.0), Vector3.RIGHT, 130.0, false)
+	_shop_row(r, placed, Vector3(-101.0, 0, -4.0), Vector3.BACK, 88.0, false) # stops short of the north row and the street
+	# skyline ring
+	for i in 22:
+		var ang := lerpf(PI * 0.5, PI * 1.5, (i + r.randf_range(0.1, 0.9)) / 22.0) # left half (x < 0)
+		var dist := r.randf_range(138, 175)
+		var p := Vector3(cos(ang) * dist, 0, sin(ang) * dist)
+		var piece: String = SKYLINE[r.randi() % SKYLINE.size()]
+		var s := r.randf_range(3.6, 4.4)
+		var yaw := atan2(-p.x, -p.z) + r.randf_range(-0.2, 0.2) # front toward the middle of the map
+		for k in 2:
+			var q := p if k == 0 else Vector3(-p.x, 0, p.z)
+			_pack_place(placed, piece, q, yaw if k == 0 else -yaw, s, false, false)
+	for key: String in placed:
+		var mm := MultiMesh.new()
+		mm.transform_format = MultiMesh.TRANSFORM_3D
+		mm.mesh = _pack_piece(key.get_slice("|", 0))[0]
+		var list: Array = placed[key]
+		mm.instance_count = list.size()
+		for k in list.size():
+			mm.set_instance_transform(k, list[k])
+		var mmi := MultiMeshInstance3D.new()
+		mmi.multimesh = mm
+		if key.ends_with("|flat"):
+			mmi.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_OFF
+		add_child(mmi)
+	_pack_root.free() # only needed to pull the meshes out
+	_pack_root = null
+
+
+const CITY_PACK := preload("res://assets/city_pack/city_pack.fbx")
+const PACK_SCALE := 4.0 # the pack is modeled about a quarter of real size
+const SHOPS := ["Plane_002", "Plane_008", "Plane_001", "Cube_002", "Plane_004", "Cube_001", "Cube_003"] # storefronts, front faces +Z
+const SKYLINE := ["Plane_027", "Plane_028", "Plane_029", "Plane_030", "Cube_014", "Cube_014"] # high-rises (open backs) + panel block
+const PACK_FRONT := {"Plane_027": -PI / 2, "Cube_014": -PI / 2} # pieces whose front faces +X instead of +Z
+var _pack_root: Node3D
+var _pack_cache := {}
+
+
+func _pack_piece(piece: String) -> Array:
+	# [mesh, transform of its node in the pack, bounds in the pack]
+	if not _pack_cache.has(piece):
+		if _pack_root == null:
+			_pack_root = CITY_PACK.instantiate()
+		var mi: MeshInstance3D = _pack_root.find_child(piece, true, false)
+		var xf := Transform3D.IDENTITY
+		var n: Node3D = mi
+		while n != _pack_root:
+			xf = n.transform * xf
+			n = n.get_parent()
+		_pack_cache[piece] = [mi.mesh, xf, xf * mi.get_aabb()]
+	return _pack_cache[piece]
+
+
+func _pack_size(piece: String, s: float) -> Vector3:
+	# width (along its front), height, depth once placed
+	var size: Vector3 = _pack_piece(piece)[2].size * s
+	return Vector3(size.z, size.y, size.x) if PACK_FRONT.has(piece) else size
+
+
+func _pack_place(placed: Dictionary, piece: String, pos: Vector3, yaw: float, s: float, shadows: bool, collide: bool) -> void:
+	# stands a piece with the middle of its footprint at pos, on the ground, its front turned toward yaw
+	var data := _pack_piece(piece)
+	var box: AABB = data[2]
+	var bottom := Vector3(box.get_center().x, box.position.y, box.get_center().z)
+	var basis := Basis(Vector3.UP, yaw + PACK_FRONT.get(piece, 0.0)) * Basis.from_scale(Vector3.ONE * s)
+	var key := piece + ("|shadow" if shadows else "|flat")
+	if not placed.has(key):
+		placed[key] = []
+	placed[key].append(Transform3D(basis, pos) * Transform3D(Basis(), -bottom) * data[1])
+	if collide:
+		var body := StaticBody3D.new()
+		body.collision_layer = 1
+		body.collision_mask = 0
+		var cs := CollisionShape3D.new()
+		var bs := BoxShape3D.new()
+		bs.size = box.size * s
+		cs.shape = bs
+		cs.position.y = bs.size.y / 2.0
+		body.add_child(cs)
+		body.position = pos
+		body.rotation.y = yaw + PACK_FRONT.get(piece, 0.0)
+		add_child(body)
+
+
+func _shop_row(r: RandomNumberGenerator, placed: Dictionary, front_mid: Vector3, along: Vector3, half_len: float, street: bool) -> void:
+	# storefronts shoulder to shoulder, fronts on a line through front_mid running along `along` and facing
+	# the map, built outward from the middle both ways. A row off to the west is copied to the east.
+	var n := Vector3(-along.z, 0, along.x)
+	if n.dot(-front_mid) < 0.0:
+		n = -n
+	var yaw := atan2(n.x, n.z)
+	var spots: Array = [] # [piece, offset along the row]
+	var last := ""
+	var cursor := 0.0
+	while true:
+		var pool := SHOPS.filter(func(k): return k != last)
+		var piece: String = pool[r.randi() % pool.size()]
+		var w := _pack_size(piece, PACK_SCALE).x
+		if spots.is_empty():
+			spots.append([piece, 0.0])
+			cursor = w / 2.0
+		else:
+			if cursor + w > half_len:
+				break
+			spots.append([piece, cursor + w / 2.0])
+			spots.append([piece, -(cursor + w / 2.0)])
+			cursor += w
+		last = piece
+	for spot: Array in spots:
+		var size := _pack_size(spot[0], PACK_SCALE)
+		var p: Vector3 = front_mid + along * float(spot[1]) - n * (size.z / 2.0)
+		_pack_place(placed, spot[0], p, yaw, PACK_SCALE, street, true)
+		if absf(front_mid.x) > 0.01:
+			_pack_place(placed, spot[0], Vector3(-p.x, 0, p.z), -yaw, PACK_SCALE, street, true)
 
 
 func _bounds() -> void:
