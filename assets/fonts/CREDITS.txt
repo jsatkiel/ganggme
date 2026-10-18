@@ -1,0 +1,6 @@
+Graffiti fonts, both from Google Fonts (github.com/google/fonts), licensed under the SIL Open Font License 1.1
+(https://openfontlicense.org). Used by tools/bake_graffiti.gd to paint the wall tags in assets/graffiti.
+
+SedgwickAveDisplay-Regular.ttf  - Copyright 2017 The Sedgwick Ave Project Authors (github.com/googlefonts/sedgwickave),
+                                  by Kevin Burke and Pablo Impallari
+RubikWetPaint-Regular.ttf       - Copyright 2020 The Rubik Filtered Project Authors (github.com/NaN-xyz/Rubik-Filtered)

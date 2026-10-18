@@ -5,6 +5,7 @@ extends RefCounted
 ## how long the car really is and how to paint it.
 
 const DIR := "res://assets/cars2/"
+const LiteMesh := preload("res://scripts/lite_mesh.gd")
 const OPP_PAINTS := [
 	Color(0.05, 0.05, 0.055), Color(0.55, 0.56, 0.58), Color(0.8, 0.8, 0.78), Color(0.32, 0.05, 0.06),
 	Color(0.08, 0.12, 0.26), Color(0.16, 0.22, 0.17), Color(0.3, 0.28, 0.25), Color(0.4, 0.33, 0.24),
@@ -33,6 +34,9 @@ static func make(id: String, rng: RandomNumberGenerator) -> Array:
 	# returns [node, size (length, height, width), collision shape]; node faces +X with its footprint centered on the origin
 	var spec: Dictionary = MODELS[id]
 	var model := _instance(id)
+	# some of these are showroom models (one is 74k triangles with its tires): cut each part to a sixth,
+	# at most 6000, which still reads as the same car
+	LiteMesh.lighten(model, func(t: int) -> int: return clampi(t / 6, 600, 6000) if t > 2000 else t)
 	if spec.has("hide"):
 		for mi in model.find_children("*" + spec.hide + "*", "MeshInstance3D", true, false):
 			mi.queue_free()

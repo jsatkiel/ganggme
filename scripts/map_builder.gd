@@ -18,6 +18,7 @@ const CAR_MODELS := [
 ]
 const CAR_PAINT := preload("res://scripts/car_paint.gdshader")
 const Cars := preload("res://scripts/cars.gd")
+const LiteMesh := preload("res://scripts/lite_mesh.gd")
 const COVERED_CAR := preload("res://assets/props/covered_car/covered_car.gltf")
 const DUMPSTER := preload("res://assets/props/dumpster/dumpster.glb")
 const TRASHBAG := preload("res://assets/props/trashbag/trashbag.gltf")
@@ -25,19 +26,28 @@ const TRASH_CAN := preload("res://assets/props/metal_trash_can/metal_trash_can.g
 const TIRE := preload("res://assets/props/old_tyre/old_tyre.gltf")
 const HYDRANT := preload("res://assets/props/fire_hydrant/fire_hydrant.gltf")
 const BOX := preload("res://assets/props/cardboard_box_01/cardboard_box_01.gltf")
+const SECURITY_BOOTH := preload("res://assets/props/security_booth/security_booth.fbx")
+const BOOTH_SCALE := 10.4
 const CAR_COLORS := [
 	Color(0.45, 0.06, 0.07), Color(0.62, 0.63, 0.65), Color(0.07, 0.07, 0.08),
 	Color(0.85, 0.85, 0.83), Color(0.1, 0.14, 0.3), Color(0.2, 0.28, 0.22), Color(0.35, 0.33, 0.3),
 ]
-const TAGS := ["SOUTHSIDE", "BLOCK", "R.I.P.", "64TH ST", "KEEP OUT", "NO LACKIN", "TWIN", "LONG LIVE"]
-const TAG_COLORS := [
-	Color(0.9, 0.15, 0.2), Color(0.2, 0.55, 1.0), Color(1.0, 0.85, 0.1), Color(0.95, 0.95, 0.95), Color(0.4, 0.9, 0.3),
+# wall graffiti, painted by tools/bake_graffiti.gd into assets/graffiti (keep the names in step with it)
+const GRAFFITI := ["southside", "block", "twin", "opps", "64th_st", "no_lackin", "long_live", "keep_out", "rip", "stay_down"]
+const GRAFFITI_THROWS := ["southside", "block", "twin", "opps"] # bubbly throw-ups; the rest are handstyle tags
+const TAG_COLORS := [ # spray can colors, a little faded by the weather
+	Color(0.85, 0.16, 0.18), Color(0.2, 0.42, 0.9), Color(0.93, 0.93, 0.93), Color(0.08, 0.08, 0.09),
+	Color(0.3, 0.75, 0.35), Color(0.95, 0.78, 0.15),
+]
+const THROW_COLORS := [ # throw-up fills: chrome, white, and loud colors
+	Color(0.78, 0.8, 0.84), Color(0.93, 0.93, 0.93), Color(0.85, 0.16, 0.18), Color(0.2, 0.42, 0.9), Color(0.95, 0.78, 0.15),
 ]
 
 var rng := RandomNumberGenerator.new()
 var player_spawns: Array[Vector3] = []
 var bot_spawns: Array[Vector3] = []
 var waypoints: Array[Vector3] = []
+var grass_tiles: Array = [] # [MultiMeshInstance3D, full draw range]: main.gd shortens the ranges when the GPU falls behind
 
 var _blocked: Array = [] # [center: Vector2, half_size: Vector2, yaw: float]
 var _boards: Array[Transform3D] = []
@@ -262,19 +272,25 @@ func _invisible_wall(pos: Vector3, size: Vector3) -> void:
 	add_child(body)
 
 
-func _tag(pos: Vector3, yaw: float, text: String, size := 1.0) -> void:
-	var l := Label3D.new()
-	l.text = text
-	l.font_size = 140
-	l.pixel_size = 0.006 * size
-	l.modulate = TAG_COLORS[rng.randi() % TAG_COLORS.size()]
-	l.outline_modulate = Color(0.05, 0.05, 0.05)
-	l.outline_size = 22
-	l.position = pos
-	l.rotation = Vector3(0, yaw, rng.randf_range(-0.15, 0.15))
-	l.shaded = true
-	l.double_sided = false
-	add_child(l)
+func _tag(pos: Vector3, yaw: float, piece: String, size := 1.0) -> void:
+	# spray-painted piece (tools/bake_graffiti.gd) projected flat onto the wall so it follows the brick.
+	# pos is just off the wall face, which faces along yaw's +Z.
+	var tex: Texture2D = load("res://assets/graffiti/%s.png" % piece)
+	var throw: bool = piece in GRAFFITI_THROWS
+	var d := Decal.new()
+	d.texture_albedo = tex
+	d.modulate = (THROW_COLORS if throw else TAG_COLORS)[rng.randi() % (THROW_COLORS if throw else TAG_COLORS).size()]
+	d.albedo_mix = 1.0
+	d.normal_fade = 0.5 # only the wall it faces, not the sides of windows or the ground
+	var w := (4.4 if throw else 3.6) * size
+	d.size = Vector3(w, 0.5, w * tex.get_height() / tex.get_width())
+	var face := Basis(Vector3.UP, yaw)
+	var out := face.z
+	var right := face.x
+	d.basis = Basis(right, out, -Vector3.UP) # projects along -Y (into the wall), image top up
+	d.position = pos - out * 0.09 # centered on the wall face
+	d.cull_mask = 1
+	add_child(d)
 
 
 # ---------------------------------------------------------------- layout
@@ -297,8 +313,8 @@ func _ground_and_roads() -> void:
 	# the gate road and the parking lot cut out of it, so every road edge is a real 15 cm curb.
 	add_box(Vector3(0, ROAD_Y - 0.5, 0), Vector3(320, 1, 320), m_road)
 	var roads := PackedVector2Array(LOT)
-	for cut in [_rect_pts(-5, 5, 4, 72.5), _rect_pts(-8, 8, 58, 72.5)]: # gate road up into the lot, wide apron at the gate
-		roads = Geometry2D.merge_polygons(roads, cut)[0]
+	# gate road up into the lot, the same width through the gate so the sidewalks beside it run on to the street
+	roads = Geometry2D.merge_polygons(roads, _rect_pts(-5, 5, 4, 72.5))[0]
 	var north := Geometry2D.clip_polygons(_rect_pts(-160, 160, -160, 71), roads)
 	for poly in north:
 		if not Geometry2D.is_polygon_clockwise(poly) or north.size() == 1:
@@ -306,7 +322,8 @@ func _ground_and_roads() -> void:
 	_ground_slab(_rect_pts(-160, 160, 85, 160)) # across the street
 	# sidewalks along the street outside the gate (open where the gate road crosses)
 	for side: float in [-1.0, 1.0]:
-		add_box(Vector3(side * 51.5, 0.03, 69), Vector3(87, 0.06, 4), m_sidewalk, false)
+		add_box(Vector3(side * 50.0, 0.03, 69), Vector3(90, 0.06, 4), m_sidewalk, false)
+		_keep_clear(Vector2(side * 50.0, 69), Vector2(90, 4), 0.0)
 	add_box(Vector3(0, 0.03, 87), Vector3(190, 0.06, 4), m_sidewalk, false)
 	for x in range(-90, 91, 6): # center line dashes
 		add_box(Vector3(x, ROAD_Y + 0.005, 78), Vector3(3, 0.01, 0.18), m_yellow, false)
@@ -327,8 +344,10 @@ func _ground_and_roads() -> void:
 	for s: float in [-1.0, 1.0]:
 		# wing walkway continues from the wing's end straight to the street sidewalk
 		_sidewalk_poly(s, [Vector2(-14.89, 11.70), Vector2(-13.28, 9.78), Vector2(-7.5, 14.63), Vector2(-7.5, 17.90)], LEFT_WING[3])
-		# sidewalk along the street, from the lot edge down to the gate (top edge follows the lot edge)
-		_sidewalk_poly(s, [Vector2(-7.5, 14.63), Vector2(-5.0, 16.7), Vector2(-5.0, 58.0), Vector2(-7.5, 58.0)])
+		# sidewalk along the street, from the lot edge through the gate to the street sidewalk (top edge follows the lot edge)
+		_sidewalk_poly(s, [Vector2(-7.5, 14.63), Vector2(-5.0, 16.7), Vector2(-5.0, 67.0), Vector2(-7.5, 67.0)])
+		# fill the strip between it and the gate fence so no lawn (or grass) is left in the corner
+		_sidewalk_poly(s, [Vector2(-8.2, 56.0), Vector2(-7.5, 56.0), Vector2(-7.5, 67.0), Vector2(-8.2, 67.0)])
 		# walkway in front of the bottom building, ending exactly at the street sidewalk
 		_sidewalk_poly(s, [Vector2(-68.0, 30.25), Vector2(-7.5, 30.25), Vector2(-7.5, 32.75), Vector2(-68.0, 32.75)])
 
@@ -512,7 +531,7 @@ func _building(cx: float, cz: float, sx: float, sz: float, floors: int, tower: b
 
 	# graffiti on the low walk-ups (mirrored with the other side's building like the rest)
 	if not tower:
-		for i in 2:
+		for i in 4:
 			var fc := r.randi() % 4
 			var face: int = [0, 1, 3, 2][fc] if flip else fc
 			var yaw: float = by + [0.0, PI, PI / 2, -PI / 2][face]
@@ -521,7 +540,7 @@ func _building(cx: float, cz: float, sx: float, sz: float, floors: int, tower: b
 			var center := c + basis * Vector3(0, 0, (sz if face < 2 else sx) / 2.0 + 0.09)
 			var o := r.randf_range(-along / 2 + 3, along / 2 - 3)
 			var p := center + basis * Vector3(-o if flip else o, 1.7, 0)
-			_tag(p, yaw, TAGS[r.randi() % TAGS.size()], r.randf_range(0.8, 1.4))
+			_tag(p, yaw, GRAFFITI[r.randi() % GRAFFITI.size()], r.randf_range(0.8, 1.2))
 
 
 const KIT := "res://assets/citykit/%s.gltf"
@@ -583,29 +602,38 @@ func _wall_shell(tris: PackedVector3Array, basis: Basis, along: float, depth: fl
 
 func _entrance() -> void:
 	# guard booth on an island in the middle of the drive
-	add_box(Vector3(0, (0.24 + ROAD_Y) / 2.0, 63), Vector3(3.2, 0.24 - ROAD_Y, 9), m_curb) # curbed island, from the road up
-	add_box(Vector3(0, 1.45, 63), Vector3(2.2, 2.5, 2.8), m_paint)
-	add_box(Vector3(0, 1.75, 63), Vector3(2.25, 0.9, 2.2), m_glass, false)
-	add_box(Vector3(0, 1.75, 63), Vector3(1.6, 0.9, 2.85), m_glass, false)
-	add_box(Vector3(0, 2.8, 63), Vector3(3.0, 0.22, 3.6), m_concrete, false)
+	add_box(Vector3(0, (0.24 + ROAD_Y) / 2.0, 63), Vector3(3.6, 0.24 - ROAD_Y, 9), m_curb) # curbed island, from the road up
+	# the user's security room model (modeled about a tenth of real size: 10.4x puts its door at 1.8 m),
+	# turned so its long side runs along the island
+	var booth := _prop(SECURITY_BOOTH, Vector3(0, 0.24, 63), PI / 2, BOOTH_SCALE, "", Vector3(0, -0.011, 0.113))
+	for mi in booth.find_children("*", "MeshInstance3D", true, false):
+		for i in mi.mesh.get_surface_count():
+			var src := mi.mesh.surface_get_material(i) as BaseMaterial3D
+			if src == null:
+				continue
+			if src.albedo_color.v < 0.05:
+				mi.set_surface_override_material(i, m_glass) # the black panes
+			else:
+				var m := src.duplicate() as BaseMaterial3D
+				m.transparency = BaseMaterial3D.TRANSPARENCY_DISABLED # walls come in at 80% alpha
+				m.albedo_color.a = 1.0
+				m.roughness = 0.85
+				mi.set_surface_override_material(i, m)
+	_invisible_wall(Vector3(0, 0.24 + 1.4, 63), Vector3(3.2, 2.8, 3.7))
 	_block(Vector2(0, 63), Vector2(3.6, 9), 0.0)
 	# yellow bollards
 	for z in [59.0, 67.0]:
 		for x in [-0.9, 0.9]:
 			add_cyl(Vector3(x, 0.24 + 0.55, z), 0.13, 0.13, 1.1, m_yellow, true) # on the island
-	# barrier arms (orange/white)
-	for side in [-1.0, 1.0]:
-		add_box(Vector3(side * 4.9, 1.0, 61.0), Vector3(6.6, 0.12, 0.12), m_orange, false) # reaches the fence
-		add_box(Vector3(side * 1.6, 0.24 + 0.6, 61.0), Vector3(0.3, 1.2, 0.3), m_paint, true)
 	# "no trespassing" sign by the gate
-	add_cyl(Vector3(-7.5, 1.3, 66), 0.05, 0.05, 2.6, m_iron)
-	add_box(Vector3(-7.5, 2.4, 66.05), Vector3(0.9, 0.6, 0.05), m_paint, false)
+	add_cyl(Vector3(-7.9, 1.3, 66), 0.05, 0.05, 2.6, m_iron)
+	add_box(Vector3(-7.6, 2.4, 66.05), Vector3(0.9, 0.6, 0.05), m_paint, false)
 	var sign := Label3D.new()
 	sign.text = "NO\nTRESPASSING"
 	sign.font_size = 48
 	sign.pixel_size = 0.004
 	sign.modulate = Color(0.8, 0.05, 0.05)
-	sign.position = Vector3(-7.5, 2.4, 66.09)
+	sign.position = Vector3(-7.6, 2.4, 66.09)
 	add_child(sign)
 
 
@@ -1275,6 +1303,10 @@ func _prop(scene: PackedScene, pos: Vector3, yaw: float, scale := 1.0, keep := "
 		for mi in model.find_children("*", "MeshInstance3D", true, false):
 			if not mi.name.contains(keep):
 				mi.visible = false
+	if scene in [TRASHBAG, BOX, TRASH_CAN, HYDRANT, TIRE]:
+		# small clutter shipped as film-quality scans (a cardboard box was 17k triangles): a sixth of that
+		# reads the same at play distance, and their shadows are too small to see but cost a draw each
+		LiteMesh.lighten(model, func(t: int) -> int: return clampi(t / 6, 800, 3000), false)
 	return root
 
 
@@ -1328,7 +1360,8 @@ func _ground_slab(poly: PackedVector2Array) -> void:
 
 
 func _grass() -> void:
-	# grass clumps (the user's grass.png on crossed cards) scattered over the lawns, one MultiMesh
+	# grass clumps (the user's grass.png on crossed cards) scattered over the lawns. The low turf layer
+	# (tools/make_short_grass.py, grass_turf.gdshader) was cut: the user preferred the tall clumps alone.
 	var r := RandomNumberGenerator.new()
 	r.seed = 4242
 	var card := ArrayMesh.new()
@@ -1348,23 +1381,8 @@ func _grass() -> void:
 	card.surface_set_material(0, mat)
 	# the base layer reaches the horizon; a denser layer with long clumps mixed in only draws near the
 	# camera, where it shows (cut-out cards are what cost the most on a laptop GPU)
-	var total := _grass_layer(r, card, 26000, 0.0, 100.0)
-	total += _grass_layer(r, card, 16000, 0.35, 45.0)
-	# low turf (tools/make_short_grass.py) carpeting the lawns between the clumps: ankle high at most,
-	# so it fills the ground without hiding anyone. Too small to see far off, so it only draws close by.
-	# One card each, turned to face the camera in the shader, so the short cards never read as X shapes.
-	st.begin(Mesh.PRIMITIVE_TRIANGLES)
-	var quad := [[Vector3(-0.5, 0, 0), Vector2(0, 1)], [Vector3(0.5, 0, 0), Vector2(1, 1)], [Vector3(0.5, 1, 0), Vector2(1, 0)], [Vector3(-0.5, 1, 0), Vector2(0, 0)]]
-	for idx in [0, 1, 2, 0, 2, 3]:
-		st.set_uv(quad[idx][1])
-		st.set_normal(Vector3.UP)
-		st.add_vertex(quad[idx][0])
-	var turf := st.commit()
-	var turf_mat := ShaderMaterial.new()
-	turf_mat.shader = preload("res://scripts/grass_turf.gdshader")
-	turf_mat.set_shader_parameter("clump", preload("res://assets/nature/grass_short.png"))
-	turf.surface_set_material(0, turf_mat)
-	total += _grass_layer(r, turf, 45000, 0.0, 30.0, true)
+	var total := _grass_layer(r, card, 20000, 0.0, 130.0)
+	total += _grass_layer(r, card, 12000, 0.35, 60.0)
 	print("[map] grass clumps: ", total)
 
 
@@ -1382,8 +1400,6 @@ func _grass_layer(r: RandomNumberGenerator, card: Mesh, tries: int, long_share: 
 		var p := Vector2(r.randf_range(-88, 88), r.randf_range(-80, 65))
 		if patches.get_noise_2d(p.x, p.y) < -0.05 and r.randf() < 0.85:
 			continue
-		if _in_lot(p) or _is_blocked(p, 0.5) or _is_blocked(p, 0.4, _clear) or _is_blocked(p, 0.4, _bldg) or p.y > 64.5: # never on concrete (walkways, building aprons, street sidewalks)
-			continue
 		var basis: Basis
 		if low:
 			var h := r.randf_range(0.14, 0.3) # 14-30 cm, about 10-25 cm showing above the snow
@@ -1392,6 +1408,11 @@ func _grass_layer(r: RandomNumberGenerator, card: Mesh, tries: int, long_share: 
 		else:
 			var size := r.randf_range(0.9, 1.4) if r.randf() < long_share else r.randf_range(0.45, 0.85)
 			basis = Basis(Vector3.UP, r.randf() * TAU).scaled(Vector3(size * r.randf_range(0.9, 1.4), size, size * r.randf_range(0.9, 1.4)))
+		# keep the whole clump (cards reach half their width out from the root) off concrete:
+		# walkways, building aprons, street sidewalks
+		var reach := maxf(basis.x.length(), basis.z.length()) * 0.5 + 0.1
+		if _in_lot(p) or _is_blocked(p, maxf(reach, 0.5)) or _is_blocked(p, reach, _clear) or _is_blocked(p, reach, _bldg) or p.y > 64.5:
+			continue
 		# turf is sunk a little so the dense band at the roots stays under the snow
 		xforms.append(Transform3D(basis, Vector3(p.x, -basis.y.length() * 0.15 if low else -0.02, p.y)))
 		var s := r.randf_range(0.75, 1.1) # some clumps greener, some dried out
@@ -1422,6 +1443,7 @@ func _grass_layer(r: RandomNumberGenerator, card: Mesh, tries: int, long_share: 
 		mmi.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_OFF
 		mmi.visibility_range_end = draw_range
 		add_child(mmi)
+		grass_tiles.append([mmi, draw_range])
 	return xforms.size()
 
 
@@ -1436,6 +1458,8 @@ func _snow_pile(p: Vector2, size: float, yaw: float) -> void:
 	pile.scale = Vector3(size, size * 0.6, size * rng.randf_range(0.8, 1.2))
 	for mi in pile.find_children("*", "MeshInstance3D", true, false):
 		mi.material_override = m_snow
+	# it ships at 50k triangles for a smooth mound; a few hundred look the same, and it casts no useful shadow
+	LiteMesh.lighten(pile, func(_t: int) -> int: return 600, false)
 	add_child(pile)
 
 

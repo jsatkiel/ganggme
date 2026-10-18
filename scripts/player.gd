@@ -4,6 +4,7 @@ extends CharacterBody3D
 const Sfx = preload("res://scripts/sfx.gd")
 const Fx = preload("res://scripts/fx.gd")
 const Pistol = preload("res://scripts/pistol.gd")
+const MuzzleFlash = preload("res://scripts/muzzle_flash.gd")
 const CrewModel = preload("res://scripts/crew_model.gd")
 const CREW_COLOR := Color(0.1, 0.25, 0.75) # placeholder: your crew wears blue
 
@@ -38,7 +39,7 @@ const ADS_FOV := 42.0
 const WEAPON_HIP := Vector3(0.22, -0.13, -0.04)
 const HIP_AIM_DIST := 15.0 # hip fire: the barrel points at the crosshair this far out (where the bullets go)
 const ADS_DISTANCE := 0.5 # how far in front of the eye the sights sit when aiming
-const FOREARM_RISE := 22.0 # degrees the forearm climbs from below the screen up to the hand
+const FOREARM_RISE := 12.0 # degrees the forearm climbs from below the screen up to the hand (the wrist bends this much)
 const WEAPON_ADS := Vector3(0.0, 0.0, 0.06)
 
 var game: Node
@@ -49,8 +50,7 @@ var camera: Camera3D
 var weapon: Node3D
 var arms # CrewModel, first-person arms
 var muzzle: Node3D
-var muzzle_light: OmniLight3D
-var flash_mesh: MeshInstance3D
+var flash # MuzzleFlash
 var col_shape: CollisionShape3D
 var capsule: CapsuleShape3D
 var shot_audio: AudioStreamPlayer
@@ -59,6 +59,11 @@ var hurt_audio: AudioStreamPlayer
 
 var pitch := 0.0
 var recoil_left := 0.0
+var recoil_side := 0.0 # sideways kick still to recover
+var gun_bounce_rot := Vector3.ZERO # this shot's random bounce of the gun model, dying away
+var gun_bounce_pos := Vector3.ZERO
+var _gun_pos := WEAPON_HIP # the gun's smoothed pose, before the bounce
+var _gun_rot := Vector3.ZERO
 var health := MAX_HEALTH
 var since_damage := 99.0
 var alive := true
@@ -138,24 +143,9 @@ func _build_weapon() -> void:
 
 	muzzle = Node3D.new()
 	muzzle.position = Pistol.MUZZLE
-	arms.gun.add_child(muzzle)
-	muzzle_light = OmniLight3D.new()
-	muzzle_light.light_color = Color(1.0, 0.75, 0.4)
-	muzzle_light.omni_range = 6.0
-	muzzle_light.light_energy = 0.0
-	muzzle.add_child(muzzle_light)
-	flash_mesh = MeshInstance3D.new()
-	var sm := SphereMesh.new()
-	sm.radius = 0.05
-	sm.height = 0.14
-	flash_mesh.mesh = sm
-	var fm := StandardMaterial3D.new()
-	fm.shading_mode = BaseMaterial3D.SHADING_MODE_UNSHADED
-	fm.albedo_color = Color(1.0, 0.85, 0.5)
-	flash_mesh.material_override = fm
-	flash_mesh.rotation.x = PI / 2
-	flash_mesh.visible = false
-	muzzle.add_child(flash_mesh)
+	arms.gun.add_child(muzzle) # (no tracers: the user cut them)
+	flash = MuzzleFlash.new()
+	muzzle.add_child(flash)
 
 
 func _mat(c: Color, rough: float) -> StandardMaterial3D:
@@ -200,11 +190,15 @@ func _look(delta: float) -> void:
 		var s := STICK_SENS * lerpf(1.0, 0.5, ads) * delta
 		rotate_y(-look.x * s)
 		pitch = clampf(pitch - look.y * s * 0.75, deg_to_rad(-88), deg_to_rad(88))
-	# recoil recovery: pull back down most of the kick
+	# recoil recovery: pull back down (and part of the way back across) from the kick
 	if recoil_left > 0.0:
-		var r := minf(recoil_left, 2.2 * delta)
+		var r := minf(recoil_left, 3.0 * delta)
 		pitch -= r
 		recoil_left -= r
+	if recoil_side != 0.0:
+		var s2 := signf(recoil_side) * minf(absf(recoil_side), 2.0 * delta)
+		rotate_y(-s2)
+		recoil_side -= s2
 	head.rotation.x = pitch
 
 
@@ -332,12 +326,13 @@ func _weapon_update(delta: float) -> void:
 		rot.x -= 0.6 * p
 		rot.z += 0.5 * p
 	rot.x += kick * 0.06
-	weapon.position = weapon.position.lerp(target, clampf(18.0 * delta, 0.0, 1.0))
-	weapon.rotation = weapon.rotation.lerp(rot, clampf(12.0 * delta, 0.0, 1.0))
-
-	muzzle_light.light_energy = move_toward(muzzle_light.light_energy, 0.0, 60.0 * delta)
-	if fire_cd < FIRE_INTERVAL - 0.03:
-		flash_mesh.visible = false
+	_gun_pos = _gun_pos.lerp(target, clampf(18.0 * delta, 0.0, 1.0))
+	_gun_rot = _gun_rot.lerp(rot, clampf(12.0 * delta, 0.0, 1.0))
+	# this shot's bounce goes on top of the smoothed pose, so it snaps, then dies away
+	gun_bounce_rot = gun_bounce_rot.lerp(Vector3.ZERO, clampf(16.0 * delta, 0.0, 1.0))
+	gun_bounce_pos = gun_bounce_pos.lerp(Vector3.ZERO, clampf(16.0 * delta, 0.0, 1.0))
+	weapon.position = _gun_pos + gun_bounce_pos
+	weapon.rotation = _gun_rot + gun_bounce_rot
 
 
 func _start_reload() -> void:
@@ -358,10 +353,8 @@ func _shoot() -> void:
 	var to := from + dir * 400.0
 	var q := PhysicsRayQueryParameters3D.create(from, to, 1 | 4, [get_rid()])
 	var hit := get_world_3d().direct_space_state.intersect_ray(q)
-	var end := to
 	var root := get_tree().current_scene
 	if hit:
-		end = hit.position
 		var col: Object = hit.collider
 		if col.get("team") == 0:
 			pass # your teammate: no friendly fire
@@ -374,18 +367,24 @@ func _shoot() -> void:
 				hud.show_hitmarker(headshot, killed)
 		else:
 			Fx.impact(root, hit.position, hit.normal)
-	Fx.tracer(root, muzzle.global_position, end)
 
-	# recoil: kick up, most of it recovers
-	var r := deg_to_rad(randf_range(0.5, 0.8)) * lerpf(1.0, 0.6, ads)
-	pitch = clampf(pitch + r, deg_to_rad(-88), deg_to_rad(88))
-	recoil_left += r * 0.65
-	rotate_y(deg_to_rad(randf_range(-0.22, 0.22)))
+	# recoil: every shot throws the aim a different way, mostly up with a random left/right jolt; most of it
+	# recovers, the rest stacks up, so a quick string of shots climbs and wanders like a real pistol
+	# aimed: 0.78, moving or not; from the hip: 1.2 standing still, up to 1.5x that on the move (full at walking pace or in the air)
+	var moving := 1.0 if not is_on_floor() else clampf(Vector2(velocity.x, velocity.z).length() / WALK_SPEED, 0.0, 1.0)
+	var steady := lerpf(1.2 * lerpf(1.0, 1.5, moving), 0.78, ads)
+	var up := deg_to_rad(randf_range(1.1, 2.0)) * steady
+	var side := deg_to_rad(randf_range(-1.1, 1.1)) * steady
+	pitch = clampf(pitch + up, deg_to_rad(-88), deg_to_rad(88))
+	rotate_y(side)
+	recoil_left += up * 0.7
+	recoil_side += side * 0.5
+	# the gun itself bounces: a random tilt, twist and shove each shot, settling fast
 	kick = 1.0
+	flash.fire()
+	gun_bounce_rot = Vector3(randf_range(0.10, 0.20), randf_range(-0.09, 0.09), randf_range(-0.16, 0.16)) * steady
+	gun_bounce_pos = Vector3(randf_range(-0.014, 0.014), randf_range(0.004, 0.014), 0.0) * steady
 	bloom = minf(bloom + 0.01, 0.06)
-	muzzle_light.light_energy = 4.0
-	flash_mesh.visible = true
-	flash_mesh.rotation.z = randf() * TAU
 	shot_audio.pitch_scale = randf_range(0.94, 1.06)
 	shot_audio.play()
 	_update_ammo_hud()
@@ -445,6 +444,7 @@ func respawn(pos: Vector3, facing: float) -> void:
 	velocity = Vector3.ZERO
 	pitch = 0.0
 	recoil_left = 0.0
+	recoil_side = 0.0
 	health = MAX_HEALTH
 	since_damage = 99.0
 	ammo = MAG_SIZE
@@ -467,13 +467,15 @@ func _fit_arms() -> void:
 	await get_tree().create_timer(0.3).timeout # let the aim animation settle
 	arms.freeze_pose("Pistol_Aim_Neutral", arms.anim.current_animation_position)
 	await get_tree().process_frame
+	_straighten_wrist()
+	await get_tree().process_frame
 	var keep := weapon.transform
 	weapon.transform = Transform3D.IDENTITY
 	arms.transform = Transform3D.IDENTITY
 	_align_gun()
 	# the forearm should rise from below the screen to the hand (like holding a real pistol out),
 	# not point back at the eye: tip the rig up around the hand and bend the wrist back down to keep the gun level
-	var sk: Skeleton3D = arms.skeleton
+	var sk: Skeleton3D = arms.anim_skeleton # the skeleton the pose is set on (the drawn arms copy it)
 	var hand := sk.find_bone("hand_r")
 	var to_cam := weapon.global_transform.affine_inverse() * sk.global_transform
 	var hand_c: Vector3 = to_cam * sk.get_bone_global_pose(hand).origin
@@ -490,10 +492,27 @@ func _fit_arms() -> void:
 	weapon.transform = keep
 
 
+func _straighten_wrist() -> void:
+	# the aim pose cocks the hand off to the side of the forearm; swing it back in line (keeping its roll, so
+	# the gun stays upright) before the rig is fitted to the screen
+	var sk: Skeleton3D = arms.anim_skeleton
+	var hand := sk.find_bone("hand_r")
+	var fore := sk.get_bone_parent(hand)
+	var knuckle := sk.find_bone("middle_01_r")
+	if hand < 0 or knuckle < 0:
+		return
+	var hand_g := sk.get_bone_global_pose(hand)
+	var fore_g := sk.get_bone_global_pose(fore)
+	var along_forearm := (hand_g.origin - fore_g.origin).normalized()
+	var along_hand := (sk.get_bone_global_pose(knuckle).origin - hand_g.origin).normalized()
+	var new_global := Basis(Quaternion(along_hand, along_forearm)) * hand_g.basis
+	sk.set_bone_pose_rotation(hand, (fore_g.basis.inverse() * new_global).orthonormalized().get_rotation_quaternion())
+
+
 func _align_gun() -> void:
 	# turn the rig so the barrel points straight ahead and the gun sits upright, sights centered.
 	# The gun is read straight off the posed skeleton (the bone attachment may not have caught up yet)
-	var sk: Skeleton3D = arms.skeleton
+	var sk: Skeleton3D = arms.anim_skeleton # the skeleton the pose is set on (the drawn arms copy it)
 	var hand_world: Transform3D = sk.global_transform * sk.get_bone_global_pose(sk.find_bone("hand_r"))
 	var g: Transform3D = weapon.global_transform.affine_inverse() * hand_world * arms.gun.transform
 	var rot := Basis(Quaternion(-g.basis.z.normalized(), Vector3.FORWARD))

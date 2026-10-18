@@ -3,8 +3,9 @@ extends CharacterBody3D
 ## (sticks near you and fights the opps). Patrols, picks the nearest enemy it can see, strafes and fires bursts.
 
 const Sfx = preload("res://scripts/sfx.gd")
-const Fx = preload("res://scripts/fx.gd")
 const CrewModel = preload("res://scripts/crew_model.gd")
+const Pistol = preload("res://scripts/pistol.gd")
+const MuzzleFlash = preload("res://scripts/muzzle_flash.gd")
 
 const SPEED := 4.2
 const STRAFE_SPEED := 2.6
@@ -37,8 +38,7 @@ var strafe_dir := 1.0
 var strafe_t := 0.0
 
 var model # CrewModel
-var muzzle: Node3D
-var muzzle_light: OmniLight3D
+var flash # MuzzleFlash
 var col_shape: CollisionShape3D
 var shot_audio: AudioStreamPlayer3D
 
@@ -71,6 +71,11 @@ func _build_model() -> void:
 	model = CrewModel.new()
 	model.bandana_color = CREW_COLOR if team == 0 else OPP_COLORS[randi() % OPP_COLORS.size()]
 	add_child(model)
+	model.enable_locomotion()
+	if model.gun: # muzzle flash at the barrel tip of the gun in its hand
+		flash = MuzzleFlash.new()
+		flash.position = Pistol.MUZZLE
+		model.gun.add_child(flash)
 	if team == 0:
 		# name tag so you can tell your teammate apart at a glance
 		var tag := Label3D.new()
@@ -84,13 +89,6 @@ func _build_model() -> void:
 		tag.fixed_size = false
 		tag.position.y = 2.25
 		add_child(tag)
-	muzzle = Node3D.new()
-	add_child(muzzle)
-	muzzle_light = OmniLight3D.new()
-	muzzle_light.light_color = Color(1.0, 0.75, 0.4)
-	muzzle_light.omni_range = 5.0
-	muzzle_light.light_energy = 0.0
-	muzzle.add_child(muzzle_light)
 
 
 func _player() -> Node3D:
@@ -110,7 +108,6 @@ func _physics_process(delta: float) -> void:
 		move_and_slide()
 		return
 
-	muzzle_light.light_energy = move_toward(muzzle_light.light_energy, 0.0, 50.0 * delta)
 	fire_cd -= delta
 	think_t -= delta
 	if think_t <= 0.0:
@@ -165,25 +162,8 @@ func _physics_process(delta: float) -> void:
 			has_last_known = false
 	else:
 		stuck_t = 0.0
-	# animation + keep the muzzle at the gun hand
-	if sees_player:
-		model.play("Pistol_Aim_Neutral")
-	elif hspeed > 0.5:
-		model.play("Jog_Fwd")
-	else:
-		model.play("Pistol_Idle")
-	_update_muzzle()
-
-
-func _update_muzzle() -> void:
-	var sk: Skeleton3D = model.skeleton
-	if sk == null:
-		return
-	var hand := sk.find_bone("hand_r")
-	if hand < 0:
-		return
-	var hand_pos := sk.global_transform * sk.get_bone_global_pose(hand).origin
-	muzzle.global_position = hand_pos - global_transform.basis.z * 0.22 + Vector3(0, 0.04, 0)
+	# animation: legs follow the actual movement, the upper body aims when engaging
+	model.move(global_transform.basis.inverse() * Vector3(velocity.x, 0, velocity.z), sees_player, delta)
 
 
 func _flat_dist(v: Vector3) -> float:
@@ -266,7 +246,6 @@ func _fire(p: Node3D) -> void:
 	fire_cd = randf_range(0.11, 0.16) if burst_left > 0 else randf_range(0.5, 1.0)
 
 	var crouched: bool = p.get("crouching") == true
-	var aim_at: Vector3 = p.global_position + Vector3(0, 0.8 if crouched else 1.3, 0)
 	var dist := global_position.distance_to(p.global_position)
 	var chance := 0.5 - dist * 0.006
 	var pv: Vector3 = p.velocity
@@ -275,15 +254,11 @@ func _fire(p: Node3D) -> void:
 	if crouched:
 		chance -= 0.1
 	chance = clampf(chance, 0.06, 0.55)
-	var hit := randf() < chance
-	var end := aim_at
-	if not hit:
-		end = aim_at + Vector3(randf_range(-1, 1), randf_range(-0.6, 0.8), randf_range(-1, 1)).normalized() * randf_range(0.6, 1.5)
-		end = muzzle.global_position + (end - muzzle.global_position) * 1.8
-	Fx.tracer(get_tree().current_scene, muzzle.global_position, end, Color(1.0, 0.6, 0.35))
-	muzzle_light.light_energy = 3.0
+	var hit := randf() < chance # (no tracer lines: the user cut them)
 	shot_audio.pitch_scale = randf_range(0.9, 1.05)
 	shot_audio.play()
+	if flash:
+		flash.fire()
 	if hit:
 		p.take_damage(DAMAGE, global_position, self)
 
@@ -304,8 +279,7 @@ func take_damage(amount: float, from_pos: Vector3, attacker: Node = null, headsh
 			rotation.y = atan2(-dir.x, -dir.z)
 		last_known = from_pos
 		has_last_known = true
-	model.scale = Vector3(1.08, 0.95, 1.08)
-	create_tween().tween_property(model, "scale", Vector3.ONE, 0.12)
+	model.flinch()
 	if health <= 0.0:
 		_die(attacker, headshot)
 		return true

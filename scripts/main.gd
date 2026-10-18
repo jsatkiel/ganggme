@@ -13,6 +13,19 @@ const KILLS_TO_WIN := 30
 const PLAYER_RESPAWN := 3.0
 const BOT_RESPAWN := 4.0
 
+# auto quality: frame cost swings with the view (the 940MX holds 60 looking down the street but not
+# across a lawn full of cut-out grass), so ease detail off when frames run long and bring it back after
+const QUALITY_LEVELS := [
+	# grass draw range factor, 3D render scale, sun shadow distance, mesh detail threshold (how many pixels of
+	# error a model may show before it switches to its simplified version; Godot's default is 1)
+	[1.0, 0.75, 80.0, 4.0],
+	[0.7, 0.75, 70.0, 8.0],
+	[0.5, 0.65, 55.0, 12.0],
+	[0.35, 0.55, 40.0, 20.0],
+]
+const SLOW_MS := 17.0 # frames averaging longer than this miss 60 FPS
+const FAST_MS := 10.5 # under this there's room to bring detail back
+
 var map: Node3D
 var player: CharacterBody3D
 var hud: CanvasLayer
@@ -21,6 +34,12 @@ var kills := 0
 var deaths := 0
 var match_over := false
 var env: Environment
+var sun: DirectionalLight3D
+var auto_quality := true
+var quality := 0
+var _frame_ms := 0.0
+var _slow_t := 0.0
+var _fast_t := 0.0
 
 
 func _ready() -> void:
@@ -70,6 +89,10 @@ func _ready() -> void:
 	Input.mouse_mode = Input.MOUSE_MODE_CAPTURED
 
 	var args := OS.get_cmdline_user_args()
+	# dev runs that set their own quality (or take screenshots) keep it fixed
+	auto_quality = not ("--fixed-quality" in args or "--screenshot" in args or "--half-res" in args or "--no-shadows" in args)
+	RenderingServer.viewport_set_measure_render_time(get_viewport().get_viewport_rid(), true)
+	get_viewport().mesh_lod_threshold = QUALITY_LEVELS[0][3]
 	if "--no-ssao" in args: env.ssao_enabled = false
 	if "--no-msaa" in args: get_viewport().msaa_3d = Viewport.MSAA_DISABLED
 	if "--no-shadows" in args:
@@ -104,6 +127,27 @@ func _ready() -> void:
 		get_tree().quit()
 	if "--debug-bots" in args:
 		_debug_bots()
+	if "--perf-log" in args:
+		Input.mouse_mode = Input.MOUSE_MODE_VISIBLE # it runs unattended: leave the mouse free
+		_perf_log()
+
+
+func _perf_log() -> void:
+	# dev: what the frame costs and what is piling up, every 5 s (godot --path . -- --perf-log)
+	var vp := get_viewport().get_viewport_rid()
+	var t := 0
+	while true:
+		await get_tree().create_timer(5.0).timeout
+		t += 5
+		print("[perf] %3ds fps %3d  gpu %5.1fms cpu %5.1fms  proc %4.1fms phys %4.1fms  draws %4d objs %4d prims %7d  nodes %5d orphans %d  mem %.0fMB vmem %.0fMB  detail -%d" % [
+			t, Engine.get_frames_per_second(),
+			RenderingServer.viewport_get_measured_render_time_gpu(vp), RenderingServer.viewport_get_measured_render_time_cpu(vp),
+			Performance.get_monitor(Performance.TIME_PROCESS) * 1000.0, Performance.get_monitor(Performance.TIME_PHYSICS_PROCESS) * 1000.0,
+			Performance.get_monitor(Performance.RENDER_TOTAL_DRAW_CALLS_IN_FRAME), Performance.get_monitor(Performance.RENDER_TOTAL_OBJECTS_IN_FRAME),
+			Performance.get_monitor(Performance.RENDER_TOTAL_PRIMITIVES_IN_FRAME),
+			Performance.get_monitor(Performance.OBJECT_NODE_COUNT), Performance.get_monitor(Performance.OBJECT_ORPHAN_NODE_COUNT),
+			Performance.get_monitor(Performance.MEMORY_STATIC) / 1048576.0, Performance.get_monitor(Performance.RENDER_VIDEO_MEM_USED) / 1048576.0,
+			quality])
 
 
 func _debug_bots() -> void:
@@ -140,7 +184,7 @@ func _build_environment() -> void:
 	var we := WorldEnvironment.new()
 	we.environment = env
 	add_child(we)
-	var sun := DirectionalLight3D.new()
+	sun = DirectionalLight3D.new()
 	sun.rotation_degrees = Vector3(-48, -35, 0)
 	sun.light_energy = 0.85
 	sun.light_color = Color(1.0, 0.96, 0.9)
@@ -152,9 +196,43 @@ func _build_environment() -> void:
 	add_child(sun)
 
 
-func _process(_delta: float) -> void:
+func _process(delta: float) -> void:
 	if match_over and Input.is_action_just_pressed("ui_accept"):
 		get_tree().reload_current_scene()
+	if auto_quality:
+		_auto_quality(delta)
+
+
+func _auto_quality(delta: float) -> void:
+	# measured work per frame, GPU or CPU, whichever is the bottleneck (not the frame rate, which
+	# vsync caps at 60 and so can't show how much room is left)
+	var vp := get_viewport().get_viewport_rid()
+	var cpu := RenderingServer.viewport_get_measured_render_time_cpu(vp) \
+		+ (Performance.get_monitor(Performance.TIME_PROCESS) + Performance.get_monitor(Performance.TIME_PHYSICS_PROCESS)) * 1000.0
+	var ms := maxf(RenderingServer.viewport_get_measured_render_time_gpu(vp), cpu)
+	if ms <= 0.0:
+		return # no measurement yet
+	_frame_ms = lerpf(_frame_ms, ms, clampf(delta * 6.0, 0.0, 1.0))
+	_slow_t = _slow_t + delta if _frame_ms > SLOW_MS else 0.0
+	_fast_t = _fast_t + delta if _frame_ms < FAST_MS else 0.0
+	if _slow_t > 1.0 and quality < QUALITY_LEVELS.size() - 1:
+		_set_quality(quality + 1)
+	elif _fast_t > 8.0 and quality > 0:
+		_set_quality(quality - 1)
+
+
+func _set_quality(level: int) -> void:
+	quality = level
+	_slow_t = 0.0
+	_fast_t = 0.0
+	var q: Array = QUALITY_LEVELS[level]
+	for t in map.grass_tiles:
+		t[0].visibility_range_end = t[1] * q[0]
+	get_viewport().scaling_3d_scale = q[1]
+	sun.directional_shadow_max_distance = q[2]
+	get_viewport().mesh_lod_threshold = q[3]
+	hud.quality = level
+	print("[game] detail level %d (frame %.1f ms)" % [level, _frame_ms])
 
 
 func _facing_center(pos: Vector3) -> float:
@@ -270,7 +348,7 @@ func _take_screenshot(args: PackedStringArray) -> void:
 		sc.near = 0.01
 		var gp: Vector3 = player.arms.gun.global_position
 		var cb: Basis = player.camera.global_transform.basis
-		sc.global_position = gp + cb.x * 0.28 + cb.y * 0.04 + cb.z * 0.02
+		sc.global_position = gp + cb.x * (-0.28 if "--fp-left" in args else 0.28) + cb.y * 0.04 + cb.z * 0.02 # --fp-left: from the thumb side
 		sc.look_at(gp)
 		sc.make_current()
 		hud.visible = false
