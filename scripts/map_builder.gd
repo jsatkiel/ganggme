@@ -942,8 +942,8 @@ func _tree(x: float, z: float, height: float) -> void:
 
 func _backdrop() -> void:
 	# the neighborhood around the block, from the user's city pack: old brick storefronts lining the street
-	# across from the gate and standing just outside the other three fences, high-rises and panel blocks
-	# further out. All in mirrored pairs; pieces only ever face the block.
+	# across from the gate and standing just outside the other three fences.
+	# All in mirrored pairs; pieces only ever face the block.
 	var r := RandomNumberGenerator.new()
 	r.seed = 7171
 	var placed := {} # pack piece + "|shadow"/"|flat" -> Array[Transform3D]
@@ -952,17 +952,7 @@ func _backdrop() -> void:
 	# behind the fences: north, and west (east is its mirror image)
 	_shop_row(r, placed, Vector3(0, 0, -95.0), Vector3.RIGHT, 130.0, false)
 	_shop_row(r, placed, Vector3(-101.0, 0, -4.0), Vector3.BACK, 88.0, false) # stops short of the north row and the street
-	# skyline ring
-	for i in 22:
-		var ang := lerpf(PI * 0.5, PI * 1.5, (i + r.randf_range(0.1, 0.9)) / 22.0) # left half (x < 0)
-		var dist := r.randf_range(138, 175)
-		var p := Vector3(cos(ang) * dist, 0, sin(ang) * dist)
-		var piece: String = SKYLINE[r.randi() % SKYLINE.size()]
-		var s := r.randf_range(3.6, 4.4)
-		var yaw := atan2(-p.x, -p.z) + r.randf_range(-0.2, 0.2) # front toward the middle of the map
-		for k in 2:
-			var q := p if k == 0 else Vector3(-p.x, 0, p.z)
-			_pack_place(placed, piece, q, yaw if k == 0 else -yaw, s, false, false)
+	# (the far skyline ring of high-rises was cut for frame rate; only the storefronts by the fences remain)
 	for key: String in placed:
 		var mm := MultiMesh.new()
 		mm.transform_format = MultiMesh.TRANSFORM_3D
@@ -983,7 +973,6 @@ func _backdrop() -> void:
 const CITY_PACK := preload("res://assets/city_pack/city_pack.fbx")
 const PACK_SCALE := 4.0 # the pack is modeled about a quarter of real size
 const SHOPS := ["Plane_002", "Plane_008", "Plane_001", "Cube_002", "Plane_004", "Cube_001", "Cube_003"] # storefronts, front faces +Z
-const SKYLINE := ["Plane_027", "Plane_028", "Plane_029", "Plane_030", "Cube_014", "Cube_014"] # high-rises (open backs) + panel block
 const PACK_FRONT := {"Plane_027": -PI / 2, "Cube_014": -PI / 2} # pieces whose front faces +X instead of +Z
 var _pack_root: Node3D
 var _pack_cache := {}

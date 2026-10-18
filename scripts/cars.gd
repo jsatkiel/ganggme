@@ -171,7 +171,8 @@ static func _tex_material(set_name: String) -> StandardMaterial3D:
 
 
 static func _hull(model: Node3D, turn: Node3D) -> ConvexPolygonShape3D:
-	# convex hull of the car's own vertices in the returned node's space, thinned to a few thousand points
+	# convex hull of the car's own vertices in the returned node's space, cut down to its outermost point in
+	# each of 56 directions: still hugs the body, but touching a car no longer tests hundreds of faces a frame
 	var pts := PackedVector3Array()
 	for mi in _meshes(model):
 		var t: Transform3D = mi.transform
@@ -185,6 +186,25 @@ static func _hull(model: Node3D, turn: Node3D) -> ConvexPolygonShape3D:
 			var step := maxi(1, verts.size() / 600)
 			for i in range(0, verts.size(), step):
 				pts.append(t * verts[i])
+	var keep := {}
+	var n := 56
+	for k in n:
+		# directions spread evenly over a sphere (golden-angle spiral)
+		var y := 1.0 - 2.0 * (k + 0.5) / n
+		var r := sqrt(1.0 - y * y)
+		var a := k * 2.39996323
+		var dir := Vector3(cos(a) * r, y, sin(a) * r)
+		var best := 0
+		var best_d := -INF
+		for i in pts.size():
+			var d := pts[i].dot(dir)
+			if d > best_d:
+				best_d = d
+				best = i
+		keep[best] = true
+	var hull := PackedVector3Array()
+	for i in keep:
+		hull.append(pts[i])
 	var shape := ConvexPolygonShape3D.new()
-	shape.points = pts
+	shape.points = hull
 	return shape
