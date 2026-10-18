@@ -5,7 +5,6 @@ extends CharacterBody3D
 const Sfx = preload("res://scripts/sfx.gd")
 const CrewModel = preload("res://scripts/crew_model.gd")
 const Pistol = preload("res://scripts/pistol.gd")
-const MuzzleFlash = preload("res://scripts/muzzle_flash.gd")
 
 const SPEED := 4.2
 const STRAFE_SPEED := 2.6
@@ -38,7 +37,7 @@ var strafe_dir := 1.0
 var strafe_t := 0.0
 
 var model # CrewModel
-var flash # MuzzleFlash
+var flash # MuzzleFlash: none on bots, only the player's gun flashes
 var col_shape: CollisionShape3D
 var shot_audio: AudioStreamPlayer3D
 
@@ -83,10 +82,6 @@ func _build_model() -> void:
 	add_child(vis)
 	vis.screen_entered.connect(func(): model.set_awake(true))
 	vis.screen_exited.connect(func(): model.set_awake(false))
-	if model.gun: # muzzle flash at the barrel tip of the gun in its hand
-		flash = MuzzleFlash.new()
-		flash.position = Pistol.MUZZLE
-		model.gun.add_child(flash)
 	if team == 0:
 		# name tag so you can tell your teammate apart at a glance
 		var tag := Label3D.new()
