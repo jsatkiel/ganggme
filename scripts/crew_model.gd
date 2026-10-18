@@ -16,6 +16,7 @@ const MALE_OPACITY := preload("res://assets/characters/male/FuseModel_Body_Opaci
 const OUTFIT_SHADER := preload("res://scripts/outfit.gdshader")
 const MALE_BODY_SHADER := preload("res://scripts/male_body.gdshader")
 const Pistol := preload("res://scripts/pistol.gd")
+const Guns := preload("res://scripts/guns.gd")
 const RigMap := preload("res://scripts/rig_map.gd")
 # the user's hoodie, pants and Jordans + the buzzed hair, baked onto the male's skeleton by tools/bake_outfit.gd
 const OUTFIT := "res://assets/characters/outfit/"
@@ -38,7 +39,7 @@ const MAX_LEG_TURN := deg_to_rad(75.0) # hips swing toward a strafe this far, th
 static var _anim_lib: AnimationLibrary
 static var _lash_mat: ShaderMaterial
 static var _male_bodies := {} # first_person -> the male's body mesh, trimmed, with outfit regions in its vertex colors
-static var _fp_sleeve: ArrayMesh # first person: the hoodie's right sleeve only
+static var _fp_sleeves := {} # first person: the hoodie's sleeve on one forearm, by side ("_r" / "_l")
 static var _male_mat: ShaderMaterial
 
 
@@ -133,6 +134,73 @@ class Retarget extends SkeletonModifier3D:
 				dst.set_bone_pose_rotation(thumb, dst.get_bone_pose_rotation(thumb) * thumb_turn)
 
 
+class SupportHand extends SkeletonModifier3D:
+	## two-handed guns: puts the left hand under the front of the gun (palm up, fingers wrapping round it), the
+	## elbow down and out. Runs last, so it reads the right hand (and the gun on it) where everything else left it.
+	var gun: Node3D # the gun holder; its parent is a BoneAttachment3D on whichever skeleton carries it
+	var point := Vector3.ZERO # where the palm holds, in the gun's space
+	var upper := -1
+	var lower := -1
+	var hand := -1
+	var fingers_local := Vector3.ZERO # the hand bone's own directions: toward the knuckles, and out of the palm
+	var palm_local := Vector3.ZERO
+	var reach := 0.0 # wrist to the middle of the palm
+	var thick := 0.0 # palm surface to the bone
+
+	func setup(sk: Skeleton3D, bones: Array, down: Vector3) -> void:
+		upper = bones[0]
+		lower = bones[1]
+		hand = bones[2]
+		# rest is a T-pose, palms down
+		var rest := sk.get_bone_global_rest(hand)
+		var knuckle: Vector3 = sk.get_bone_global_rest(bones[3]).origin - rest.origin
+		fingers_local = (rest.basis.inverse() * knuckle).normalized()
+		palm_local = (rest.basis.inverse() * down).normalized()
+		reach = knuckle.length() * 0.6
+		thick = knuckle.length() * 0.3
+
+	func _process_modification_with_delta(_delta: float) -> void:
+		var sk := get_skeleton()
+		var att := gun.get_parent() as BoneAttachment3D if gun else null
+		if sk == null or att == null or upper < 0:
+			return
+		var carrier := att.get_parent() as Skeleton3D
+		var g: Transform3D = sk.global_transform.affine_inverse() * carrier.global_transform \
+			* carrier.get_bone_global_pose(att.get_bone_idx()) * gun.transform
+		var right := g.basis.x.normalized()
+		var up := g.basis.y.normalized()
+		var back := g.basis.z.normalized()
+		var fingers := (right * 0.75 + up * 0.15 - back * 0.6).normalized()
+		var palm := (up - fingers * fingers.dot(up)).normalized()
+		var wrist := g * point - fingers * reach - palm * thick
+		var pole := (-right * 0.6 - up + back * 0.2).normalized()
+		# two-bone reach: shoulder and elbow turn so the wrist lands on the spot, the elbow bending toward the pole
+		var a := sk.get_bone_global_pose(upper).origin
+		var b := sk.get_bone_global_pose(lower).origin
+		var l1 := a.distance_to(b)
+		var l2 := b.distance_to(sk.get_bone_global_pose(hand).origin)
+		var to := wrist - a
+		var d := clampf(to.length(), absf(l1 - l2) + 0.001 * l1, (l1 + l2) * 0.999)
+		var dir := to.normalized()
+		var cos_a := clampf((l1 * l1 + d * d - l2 * l2) / (2.0 * l1 * d), -1.0, 1.0)
+		var side := (pole - dir * pole.dot(dir)).normalized()
+		var elbow := a + dir * l1 * cos_a + side * l1 * sqrt(1.0 - cos_a * cos_a)
+		_turn(sk, upper, b - a, elbow - a)
+		var w := sk.get_bone_global_pose(hand).origin
+		_turn(sk, lower, w - elbow, wrist - elbow)
+		# the hand itself: knuckles and palm as worked out above
+		var have := Basis(fingers_local, palm_local, fingers_local.cross(palm_local)).orthonormalized()
+		var want := Basis(fingers, palm, fingers.cross(palm)).orthonormalized()
+		var parent := sk.get_bone_global_pose(lower).basis.orthonormalized()
+		sk.set_bone_pose_rotation(hand, (parent.inverse() * want * have.inverse()).get_rotation_quaternion())
+
+	func _turn(sk: Skeleton3D, bone: int, from: Vector3, to: Vector3) -> void:
+		# swing a bone (in the skeleton's space) so that `from` points along `to`
+		var global := Basis(Quaternion(from.normalized(), to.normalized())) * sk.get_bone_global_pose(bone).basis
+		var parent := sk.get_bone_global_pose(sk.get_bone_parent(bone)).basis
+		sk.set_bone_pose_rotation(bone, (parent.inverse() * global).get_rotation_quaternion())
+
+
 var bandana_color := Color(0.75, 0.05, 0.08)
 var first_person := false # arms-only view for the player: no head, hair or head bandana, no shadows
 var gun: Node3D
@@ -144,7 +212,10 @@ var anim_skeleton: Skeleton3D # the base body's, which the animations play on
 var tree: AnimationTree # set up by enable_locomotion()
 var twist: SpineTwist
 var retarget: Retarget
+var support: SupportHand # two-handed guns: the left hand on the front of the gun
+var left_arm: Array[Node3D] = [] # first person: the left hand and sleeve, drawn only for two-handed guns
 var _awake := true
+var _two_hands := false
 var _dead := false # playing the death fall (on the AnimationPlayer, not the tree)
 var _body_root: Node3D
 var _current := ""
@@ -227,12 +298,15 @@ func _dress_male(mi: MeshInstance3D) -> void:
 	# third person drops what the clothes cover; first person keeps only the right forearm and hand
 	if not _male_bodies.has(first_person):
 		var regions := []
-		var right_arm := [] # first person: the one arm in view
+		var right_arm := [] # first person: the arm in view (the left one shows only for two-handed guns)
+		var left_arm_bones := []
 		for i in mi.skin.get_bind_count():
 			var crew := RigMap.to_crew(String(mi.skin.get_bind_name(i)))
 			regions.append(_region_for(crew))
-			right_arm.append(crew.ends_with("_r") and not crew.begins_with("upperarm") and not crew.begins_with("clavicle") \
-				and not crew.begins_with("thigh") and not crew.begins_with("calf") and not crew.begins_with("foot") and not crew.begins_with("ball"))
+			var forearm_down := not crew.begins_with("upperarm") and not crew.begins_with("clavicle") \
+				and not crew.begins_with("thigh") and not crew.begins_with("calf") and not crew.begins_with("foot") and not crew.begins_with("ball")
+			right_arm.append(crew.ends_with("_r") and forearm_down)
+			left_arm_bones.append(crew.ends_with("_l") and forearm_down)
 		var a: Array = mi.mesh.surface_get_arrays(0)
 		var bones: PackedInt32Array = a[Mesh.ARRAY_BONES]
 		var wts: PackedFloat32Array = a[Mesh.ARRAY_WEIGHTS]
@@ -242,14 +316,19 @@ func _dress_male(mi: MeshInstance3D) -> void:
 		cols.resize(n)
 		var show := PackedByteArray() # vertices the clothes don't cover: skin, plus the forearms near the cuffs
 		show.resize(n)
+		var show_l := PackedByteArray()
+		show_l.resize(n)
 		for k in n:
 			var c := Color(0, 0, 0, 0)
 			var arm := 0.0
 			var in_view := 0.0
+			var in_left := 0.0
 			for j in per:
 				var w := wts[k * per + j]
 				if right_arm[bones[k * per + j]]:
 					in_view += w
+				if left_arm_bones[bones[k * per + j]]:
+					in_left += w
 				match regions[bones[k * per + j]]:
 					HOODIE: c.r += w
 					FOREARM:
@@ -265,9 +344,16 @@ func _dress_male(mi: MeshInstance3D) -> void:
 			cols[k] = c
 			if first_person:
 				show[k] = 1 if in_view > 0.5 and arm < 0.75 else 0 # hand and wrist: the forearm under the sleeve would poke through it
+				show_l[k] = 1 if in_left > 0.5 and arm < 0.75 else 0
 			else:
 				show[k] = 1 if c.a > 0.05 or arm > 0.3 else 0
 		a[Mesh.ARRAY_COLOR] = cols
+		if first_person:
+			var left := a.duplicate()
+			_keep_uncovered(left, show_l, per)
+			var left_mesh := ArrayMesh.new()
+			left_mesh.add_surface_from_arrays(Mesh.PRIMITIVE_TRIANGLES, left, [], {}, Mesh.ARRAY_FLAG_USE_8_BONE_WEIGHTS if per == 8 else 0)
+			_male_bodies["left_hand"] = left_mesh
 		_keep_uncovered(a, show, per)
 		var body := ArrayMesh.new()
 		body.add_surface_from_arrays(Mesh.PRIMITIVE_TRIANGLES, a, [], {}, Mesh.ARRAY_FLAG_USE_8_BONE_WEIGHTS if per == 8 else 0)
@@ -279,11 +365,21 @@ func _dress_male(mi: MeshInstance3D) -> void:
 		_male_mat.set_shader_parameter("normal_tex", MALE_NORMAL)
 	mi.mesh = _male_bodies[first_person]
 	mi.material_override = _male_mat
+	if first_person:
+		var left := MeshInstance3D.new()
+		left.name = "LeftHand"
+		left.mesh = _male_bodies["left_hand"]
+		left.skin = mi.skin
+		left.material_override = _male_mat
+		left.visible = false
+		mi.add_sibling(left)
+		left.skeleton = mi.skeleton
+		left_arm.append(left)
 
 
-static func _right_sleeve(hoodie: Mesh, skin: Skin) -> ArrayMesh:
-	# first person: just the part of the hoodie on the right forearm (the rest is out of view or would block it)
-	if _fp_sleeve == null:
+static func _sleeve(hoodie: Mesh, skin: Skin, side: String) -> ArrayMesh:
+	# first person: just the part of the hoodie on one forearm (the rest is out of view or would block it)
+	if not _fp_sleeves.has(side):
 		var a: Array = hoodie.surface_get_arrays(0)
 		var bones: PackedInt32Array = a[Mesh.ARRAY_BONES]
 		var wts: PackedFloat32Array = a[Mesh.ARRAY_WEIGHTS]
@@ -292,7 +388,7 @@ static func _right_sleeve(hoodie: Mesh, skin: Skin) -> ArrayMesh:
 		var arm := []
 		for i in skin.get_bind_count():
 			var crew := RigMap.to_crew(String(skin.get_bind_name(i)))
-			arm.append(crew == "lowerarm_r") # (the bit of cuff that follows the hand swings over the knuckles when the wrist bends)
+			arm.append(crew == "lowerarm" + side) # (the bit of cuff that follows the hand swings over the knuckles when the wrist bends)
 		var show := PackedByteArray()
 		show.resize(n)
 		for k in n:
@@ -301,14 +397,15 @@ static func _right_sleeve(hoodie: Mesh, skin: Skin) -> ArrayMesh:
 				if arm[bones[k * per + j]]:
 					w += wts[k * per + j]
 			show[k] = 1 if w > 0.5 else 0
-		_shift_cuff(a, show, skin, CUFF_SHIFT)
+		_shift_cuff(a, show, skin, CUFF_SHIFT, side)
 		_keep_uncovered(a, show, per, 3) # whole triangles only: no loose flap at the cut
-		_fp_sleeve = ArrayMesh.new()
-		_fp_sleeve.add_surface_from_arrays(Mesh.PRIMITIVE_TRIANGLES, a)
-	return _fp_sleeve
+		var sleeve := ArrayMesh.new()
+		sleeve.add_surface_from_arrays(Mesh.PRIMITIVE_TRIANGLES, a)
+		_fp_sleeves[side] = sleeve
+	return _fp_sleeves[side]
 
 
-static func _shift_cuff(a: Array, show: PackedByteArray, skin: Skin, amount: float) -> void:
+static func _shift_cuff(a: Array, show: PackedByteArray, skin: Skin, amount: float, side: String) -> void:
 	# the sleeve was fitted on an arms-down pose and its cuff sits off to the side of the wrist: slide it toward
 	# the forearm's line (amount 1 = cuff centered on it), easing off to nothing at the elbow
 	var elbow := Vector3.ZERO
@@ -316,10 +413,10 @@ static func _shift_cuff(a: Array, show: PackedByteArray, skin: Skin, amount: flo
 	var found := 0
 	for i in skin.get_bind_count():
 		var crew := RigMap.to_crew(String(skin.get_bind_name(i)))
-		if crew == "lowerarm_r":
+		if crew == "lowerarm" + side:
 			elbow = skin.get_bind_pose(i).affine_inverse().origin
 			found += 1
-		elif crew == "hand_r":
+		elif crew == "hand" + side:
 			wrist = skin.get_bind_pose(i).affine_inverse().origin
 			found += 1
 	if found < 2:
@@ -515,6 +612,8 @@ func set_awake(on: bool) -> void:
 		retarget.active = on
 	if twist:
 		twist.active = on
+	if support:
+		support.active = on and _two_hands
 
 
 func move(local_velocity: Vector3, aiming: bool, delta: float) -> void:
@@ -558,10 +657,31 @@ func flinch() -> void:
 		tree.set("parameters/hit/request", AnimationNodeOneShot.ONE_SHOT_REQUEST_FIRE)
 
 
+func show_gun(kind: String) -> void:
+	# this round's gun in the hand (guns.gd); the AK and RICKY bring the left hand up to hold the front
+	Guns.show(gun, kind, false) # (no gun shadows: a lot of guns on a weak GPU, too small to miss)
+	_two_hands = Guns.SUPPORT.has(kind)
+	for n in left_arm:
+		n.visible = _two_hands
+	if _two_hands and support == null:
+		support = SupportHand.new()
+		support.gun = gun
+		var bones := []
+		for n in ["upperarm_l", "lowerarm_l", "hand_l", "middle_01_l"]:
+			bones.append(bone(n))
+		if bones.has(-1):
+			support = null
+			return
+		support.setup(skeleton, bones, (_skel_from_model(skeleton).basis.inverse() * Vector3.DOWN).normalized())
+		skeleton.add_child(support)
+	if support:
+		skeleton.move_child(support, -1) # after the pose copy and the spine twist
+		support.point = Guns.SUPPORT.get(kind, Vector3.ZERO)
+		support.active = _two_hands and _awake
+
+
 func _region_for(bone_name: String) -> int:
 	var b := bone_name.to_lower()
-	if first_person and b.ends_with("_l") and (b.begins_with("lowerarm") or b.begins_with("hand") or b.contains("index") or b.contains("middle") or b.contains("ring") or b.contains("pinky") or b.contains("thumb")):
-		return HEAD # first person is one-handed: hide the left arm like the head
 	if b.begins_with("foot") or b.begins_with("ball"):
 		return SHOES
 	if b.begins_with("thigh") or b.begins_with("calf") or b == "pelvis" or b == "root":
@@ -617,11 +737,20 @@ func _wear_garments() -> void:
 		mi.name = "Garment_" + g
 		mi.mesh = load(OUTFIT + g + ".res")
 		mi.skin = load(OUTFIT + g + "_skin.tres")
+		var hoodie: Mesh = mi.mesh
 		if first_person:
-			mi.mesh = _right_sleeve(mi.mesh, mi.skin)
+			mi.mesh = _sleeve(hoodie, mi.skin, "_r")
 		mi.material_override = mats.get(g, shoe)
 		skeleton.add_child(mi)
 		mi.skeleton = NodePath("..")
+		if first_person:
+			var left := mi.duplicate() as MeshInstance3D
+			left.name = "Garment_left_sleeve"
+			left.mesh = _sleeve(hoodie, mi.skin, "_l")
+			left.visible = false
+			skeleton.add_child(left)
+			left.skeleton = NodePath("..")
+			left_arm.append(left)
 	for m in outfit_mats:
 		m.set_shader_parameter("hoodie_puff", 0.0)
 		m.set_shader_parameter("pants_puff", 0.0)

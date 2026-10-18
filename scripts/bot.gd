@@ -274,7 +274,7 @@ func set_gun(kind: String) -> void:
 	# this round's gun: the model in the hand and how the bot fights with it
 	gun_kind = kind
 	if model and model.gun:
-		Guns.show(model.gun, kind, false)
+		model.show_gun(kind)
 
 
 func _fire(p: Node3D) -> void:

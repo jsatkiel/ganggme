@@ -116,6 +116,7 @@ var slide_t := 0.0
 var slide_dir := Vector3.ZERO
 var bob_t := 0.0
 var force_ads := false # dev: --ads screenshots
+var _arms_fit = null # Transform3D: the view model fitted to the Glock's sights (_fit_arms), before _sight_up
 
 
 func _ready() -> void:
@@ -193,8 +194,9 @@ func apply_loadout() -> void:
 		for n in arms.gun.get_children():
 			if n.has_meta("beam") and gun_kind == "pistol":
 				laser_beam = n
-		Guns.show(arms.gun, gun_kind, false) # the Glock, or this round's placeholder long gun
+		arms.show_gun(gun_kind) # the Glock, or this round's long gun
 		muzzle.position = Guns.MUZZLE.get(gun_kind, Pistol.MUZZLE)
+		_sight_up()
 	apply_settings()
 
 
@@ -658,6 +660,8 @@ func _fit_arms() -> void:
 	await get_tree().process_frame
 	_align_gun()
 	weapon.transform = keep
+	_arms_fit = arms.transform
+	_sight_up()
 	# remember the fitted elbow, and its hinge: across the upper arm and forearm (turning about it folds the arm)
 	var fore := sk.get_bone_parent(hand)
 	var upper := sk.get_bone_parent(fore)
@@ -666,6 +670,14 @@ func _fit_arms() -> void:
 	_elbow_axis = (sk.get_bone_global_pose(upper).basis.inverse() * u.cross(fv)).normalized()
 	_elbow_rest = sk.get_bone_pose_rotation(fore)
 	_elbow = fore
+
+
+func _sight_up() -> void:
+	# the rig is fitted to the Glock's sights; a gun with taller sights drops the whole view model by the
+	# difference so its sights sit dead center when aiming instead
+	if _arms_fit == null:
+		return # not fitted yet: _fit_arms calls this when it is
+	arms.transform = Transform3D(Basis.IDENTITY, Vector3(0, Pistol.SIGHT_HEIGHT - Guns.sight_height(gun_kind), 0)) * _arms_fit
 
 
 func _straighten_wrist() -> void:
