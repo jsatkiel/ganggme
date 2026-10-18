@@ -5,13 +5,13 @@ extends CharacterBody3D
 const Sfx = preload("res://scripts/sfx.gd")
 const CrewModel = preload("res://scripts/crew_model.gd")
 const Pistol = preload("res://scripts/pistol.gd")
+const Guns = preload("res://scripts/guns.gd")
 
 const SPEED := 4.2
 const STRAFE_SPEED := 2.6
 const GRAVITY := 16.0
 const MAX_HEALTH := 100.0
 const SIGHT_RANGE := 70.0
-const DAMAGE := 9.0
 const OPP_COLORS := [Color(0.72, 0.05, 0.08), Color(0.62, 0.04, 0.06)] # bandana color, placeholder rival crew: red
 const CREW_COLOR := Color(0.1, 0.25, 0.75) # placeholder: your crew wears blue
 
@@ -19,6 +19,8 @@ var game: Node
 var map: Node
 var display_name := "OPP"
 var team := 1
+var slot := 0 # place on the team (0-7): picks this round's gun category (guns.gd)
+var gun_kind := "pistol"
 var target: Node3D # enemy currently in sight
 
 var health := MAX_HEALTH
@@ -133,12 +135,16 @@ func _physics_process(delta: float) -> void:
 		var side := to_p.normalized().cross(Vector3.UP)
 		move = side * strafe_dir * STRAFE_SPEED
 		var hill: Vector3 = game.hill_target() if game and game.has_method("hill_target") else Vector3.INF
-		if hill != Vector3.INF and _flat_dist(hill) > 3.5:
+		var gun: Dictionary = Guns.STATS[gun_kind]
+		if gun_kind == "shotgun" and to_p.length() > gun.bot_range and to_p.length() < 30.0:
+			# shotgun: rush whoever it's fighting until it's close enough to hit
+			move += to_p.normalized() * SPEED * 0.9
+		elif hill != Vector3.INF and _flat_dist(hill) > 3.5:
 			# King of the Hood: keep pushing the circle while shooting
 			var to_h := hill - global_position
 			to_h.y = 0
 			move += to_h.normalized() * SPEED * 0.75
-		elif to_p.length() > 30.0:
+		elif to_p.length() > gun.bot_range:
 			move += to_p.normalized() * SPEED * 0.7
 		react_t -= delta
 		if react_t <= 0.0 and fire_cd <= 0.0:
@@ -264,29 +270,37 @@ func _pick_waypoint() -> void:
 		rotation.y += PI * 0.5
 
 
+func set_gun(kind: String) -> void:
+	# this round's gun: the model in the hand and how the bot fights with it
+	gun_kind = kind
+	if model and model.gun:
+		Guns.show(model.gun, kind, false)
+
+
 func _fire(p: Node3D) -> void:
+	var gun: Dictionary = Guns.STATS[gun_kind]
 	if burst_left <= 0:
-		burst_left = randi_range(2, 5)
+		burst_left = randi_range(gun.bot_burst[0], gun.bot_burst[1])
 	burst_left -= 1
-	# single fire: a trigger pull per shot, so a string of shots is paced, not sprayed
-	fire_cd = randf_range(0.26, 0.4) if burst_left > 0 else randf_range(0.6, 1.1)
+	# pistol / shotgun: a trigger pull per shot, so a string of shots is paced; rifle / SMG: quick bursts
+	fire_cd = randf_range(gun.bot_interval[0], gun.bot_interval[1]) if burst_left > 0 else randf_range(gun.bot_pause[0], gun.bot_pause[1])
 
 	var crouched: bool = p.get("crouching") == true
 	var dist := global_position.distance_to(p.global_position)
-	var chance := 0.5 - dist * 0.006
+	var chance: float = gun.bot_accuracy - dist * (0.03 if gun_kind == "shotgun" else 0.006)
 	var pv: Vector3 = p.velocity
 	if Vector2(pv.x, pv.z).length() > 6.0:
 		chance -= 0.15
 	if crouched:
 		chance -= 0.1
-	chance = clampf(chance, 0.06, 0.55)
+	chance = clampf(chance, 0.06, maxf(0.55, gun.bot_accuracy))
 	var hit := randf() < chance # (no tracer lines: the user cut them)
-	shot_audio.pitch_scale = randf_range(0.9, 1.05)
+	shot_audio.pitch_scale = randf_range(0.9, 1.05) * gun.sound_pitch
 	shot_audio.play()
 	if flash:
 		flash.fire()
 	if hit:
-		p.take_damage(DAMAGE, global_position, self)
+		p.take_damage(Guns.damage_at(gun_kind, gun.bot_damage, dist), global_position, self)
 
 
 func is_headshot(pos: Vector3) -> bool:

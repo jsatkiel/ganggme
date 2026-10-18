@@ -224,7 +224,7 @@ func _page_main() -> void:
 	_add_label(col, "KING OF THE HOOD" if koth else "TEAM DEATHMATCH", 18, ACCENT)
 	_add_label(col, "PAUSED", 72, Color.WHITE)
 	if game and koth:
-		_add_label(col, "ROUND %d      YOUR CREW  %d   —   %d  OPPS      BEST OF 5" % [game.round_num, game.round_wins[0], game.round_wins[1]], 18, DIM)
+		_add_label(col, "ROUND %d      YOUR CREW  %d   —   %d  OPPS      BEST OF %d" % [game.round_num, game.round_wins[0], game.round_wins[1], game.ROUNDS_TO_WIN * 2 - 1], 18, DIM)
 	elif game:
 		_add_label(col, "YOUR CREW  %d   —   %d  OPPS      FIRST TO %d" % [game.kills, game.deaths, game.get_script().KILLS_TO_WIN], 18, DIM)
 	_spacer(col, 40)
@@ -503,6 +503,8 @@ func _page_settings() -> void:
 	_section(col, "VIDEO")
 	_slider(col, "FIELD OF VIEW", "fov", 60.0, 100.0, 1.0, "%d")
 	_toggle(col, "SHOW FPS", "fps")
+	_section(col, "MATCH")
+	_toggle(col, "KING OF THE HOOD 8 V 8 (OFF: 4 V 4, FASTER)  ·  NEXT MATCH", "big_teams")
 	_section(col, "AUDIO")
 	_slider(col, "MASTER VOLUME", "volume", 0.0, 1.0, 0.05, "%d%%", 100.0)
 	_spacer(col, 16)

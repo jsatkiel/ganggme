@@ -81,7 +81,8 @@ const CLASS_COUNT := 3
 
 static var classes: Array = [] # [{name, weapon, muzzle, magazine, laser, trigger, camo, perks: [id, id, id]}]
 static var active := 0
-static var settings := {"sens": 1.0, "stick": 1.0, "invert": false, "fov": 78.0, "volume": 1.0, "fps": true, "mode": "koth"}
+static var settings := {"sens": 1.0, "stick": 1.0, "invert": false, "fov": 78.0, "volume": 1.0, "fps": true, "mode": "koth",
+	"big_teams": true} # big_teams: King of the Hood 8 v 8 (off: 4 v 4, easier on a laptop)
 
 
 static func default_class(i: int) -> Dictionary:

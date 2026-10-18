@@ -1,9 +1,11 @@
 extends CharacterBody3D
-## First-person player: COD-style movement (sprint, slide, crouch, jump) and the crew pistol.
+## First-person player: COD-style movement (sprint, slide, crouch, jump) and the gun for this round: the crew
+## pistol from your loadout, or a shotgun, rifle or SMG in King of the Hood (guns.gd).
 
 const Sfx = preload("res://scripts/sfx.gd")
 const Fx = preload("res://scripts/fx.gd")
 const Pistol = preload("res://scripts/pistol.gd")
+const Guns = preload("res://scripts/guns.gd")
 const MuzzleFlash = preload("res://scripts/muzzle_flash.gd")
 const CrewModel = preload("res://scripts/crew_model.gd")
 const Loadout = preload("res://scripts/loadout.gd")
@@ -85,6 +87,11 @@ var speed_mult := 1.0
 var sprint_mult := 1.0
 var regen_bonus := 0.0
 var flash_size := 1.0
+var gun_kind := "pistol" # this round's gun category (guns.gd); main.gd sets it before the respawn
+var auto_fire := false # rifle / SMG: hold the trigger
+var pellets := 1
+var pellet_cone := 0.0
+var sound_pitch := 1.0
 var hip_fov := HIP_FOV
 var laser_on := true # T / D-pad left switches the laser sight's beam on and off
 var laser_beam: MeshInstance3D # set when the laser sight is equipped
@@ -156,6 +163,8 @@ func apply_loadout() -> void:
 	# the active class from the pause menu: the pistol's numbers, attachments, perks and camo
 	var c := Loadout.current()
 	var s := Loadout.stats(c)
+	if gun_kind != "pistol":
+		s = _category_stats(gun_kind)
 	weapon_name = s.name
 	mag_size = s.mag
 	reserve_max = s.reserve
@@ -168,6 +177,10 @@ func apply_loadout() -> void:
 	sprint_mult = s.sprint
 	regen_bonus = s.regen
 	flash_size = s.flash
+	auto_fire = s.get("auto", false)
+	pellets = s.get("pellets", 1)
+	pellet_cone = s.get("cone", 0.0)
+	sound_pitch = s.get("sound_pitch", 1.0)
 	if ResourceLoader.exists(s.sound):
 		shot_audio.stream = load(s.sound)
 	shot_audio.volume_db = -4.0 + s.volume
@@ -178,9 +191,28 @@ func apply_loadout() -> void:
 		Pistol.dress(arms.gun, Loadout.camo(c.camo), parts)
 		laser_beam = null
 		for n in arms.gun.get_children():
-			if n.has_meta("beam"):
+			if n.has_meta("beam") and gun_kind == "pistol":
 				laser_beam = n
+		Guns.show(arms.gun, gun_kind, false) # the Glock, or this round's placeholder long gun
+		muzzle.position = Guns.MUZZLE.get(gun_kind, Pistol.MUZZLE)
 	apply_settings()
+
+
+func _category_stats(kind: String) -> Dictionary:
+	# a shotgun / rifle / SMG: its own numbers, with your class's perks on top (attachments are pistol-only)
+	var g: Dictionary = Guns.STATS[kind]
+	var s := {"name": g.name, "damage": g.damage, "interval": g.interval, "mag": g.mag, "reserve": g.reserve,
+		"reload": g.reload, "recoil": g.recoil, "spread": g.spread, "mobility": g.mobility, "volume": g.volume,
+		"flash": 1.3, "speed": 1.0, "sprint": 1.0, "regen": 0.0, "sound": "res://assets/audio/pistol_fp.wav",
+		"auto": g.auto, "pellets": g.get("pellets", 1), "cone": g.get("cone", 0.0), "sound_pitch": g.sound_pitch}
+	var c := Loadout.current()
+	for i in Loadout.PERKS.size():
+		var p := Loadout.perk(i, c.perks[i] if i < c.perks.size() else "")
+		for k in ["damage", "reload", "spread", "speed", "sprint"]:
+			if p.has(k):
+				s[k] *= p[k]
+		s.regen += p.get("regen", 0.0)
+	return s
 
 
 func _audio(stream: AudioStream, db: float, poly: int) -> AudioStreamPlayer:
@@ -207,6 +239,7 @@ func _build_weapon() -> void:
 	_fit_arms.call_deferred()
 
 	muzzle = Node3D.new()
+	muzzle.set_meta("muzzle", true) # stays visible whichever gun is showing
 	muzzle.position = Pistol.MUZZLE
 	arms.gun.add_child(muzzle) # (no tracers: the user cut them)
 	flash = MuzzleFlash.new()
@@ -394,8 +427,9 @@ func _weapon_update(delta: float) -> void:
 	if Input.is_action_just_pressed("laser") and laser_beam:
 		laser_on = not laser_on
 
-	# single fire: one shot per trigger pull (a pull just before the gun is ready still counts)
-	if Input.is_action_just_pressed("fire"):
+	# single fire: one shot per trigger pull (a pull just before the gun is ready still counts);
+	# rifle and SMG keep firing while the trigger is held
+	if Input.is_action_just_pressed("fire") or (auto_fire and Input.is_action_pressed("fire")):
 		fire_queued = 0.2
 	fire_queued -= delta
 	if fire_queued > 0.0 and fire_cd <= 0.0 and not reloading and not sprinting:
@@ -458,26 +492,38 @@ func _shoot() -> void:
 	ammo -= 1
 	var basis_cam := camera.global_transform.basis
 	var forward := -basis_cam.z
-	var off := Vector2.from_angle(randf() * TAU) * sqrt(randf()) * tan(current_spread)
-	var dir := (forward + basis_cam.x * off.x + basis_cam.y * off.y).normalized()
 	var from := camera.global_position
-	var to := from + dir * 400.0
-	var q := PhysicsRayQueryParameters3D.create(from, to, 1 | 4, [get_rid()])
-	var hit := get_world_3d().direct_space_state.intersect_ray(q)
 	var root := get_tree().current_scene
-	if hit:
+	# one ray per bullet (8 pellets for the shotgun, spread over its cone); a body hit by several pellets takes
+	# them all as one hit, so it gets one hitmarker and one kill
+	var hits := {} # collider -> [damage, headshot, position]
+	var off := Vector2.from_angle(randf() * TAU) * sqrt(randf()) * tan(current_spread)
+	for i in pellets:
+		var po := off
+		if pellets > 1:
+			po += Vector2.from_angle(randf() * TAU) * sqrt(randf()) * tan(pellet_cone * lerpf(1.0, 0.7, ads))
+		var dir := (forward + basis_cam.x * po.x + basis_cam.y * po.y).normalized()
+		var q := PhysicsRayQueryParameters3D.create(from, from + dir * 400.0, 1 | 4, [get_rid()])
+		var hit := get_world_3d().direct_space_state.intersect_ray(q)
+		if not hit:
+			continue
 		var col: Object = hit.collider
 		if col.get("team") == 0:
-			pass # your teammate: no friendly fire
-		elif col.has_method("take_damage"):
-			var headshot: bool = col.has_method("is_headshot") and col.is_headshot(hit.position)
-			var killed: bool = col.take_damage(damage * (HEADSHOT_MULT if headshot else 1.0), global_position, self, headshot)
-			Fx.puff(root, hit.position, Color(0.6, 0.1, 0.1))
-			tick_audio.play()
-			if hud:
-				hud.show_hitmarker(headshot, killed)
+			continue # your teammate: no friendly fire
+		if col.has_method("take_damage"):
+			var hs: bool = col.has_method("is_headshot") and col.is_headshot(hit.position)
+			var dmg := Guns.damage_at(gun_kind, damage, from.distance_to(hit.position)) * (HEADSHOT_MULT if hs else 1.0)
+			var h: Array = hits.get(col, [0.0, false, hit.position])
+			hits[col] = [h[0] + dmg, h[1] or hs, h[2]]
 		else:
 			Fx.impact(root, hit.position, hit.normal)
+	for col in hits:
+		var h: Array = hits[col]
+		var killed: bool = col.take_damage(h[0], global_position, self, h[1])
+		Fx.puff(root, h[2], Color(0.6, 0.1, 0.1))
+		tick_audio.play()
+		if hud:
+			hud.show_hitmarker(h[1], killed)
 
 	# recoil: every shot throws the aim a different way, mostly up with a random left/right jolt; most of it
 	# recovers, the rest stacks up, so a quick string of shots climbs and wanders like a real pistol
@@ -504,7 +550,7 @@ func _shoot() -> void:
 	if hud:
 		hud.kick_crosshair(Vector2(rad_to_deg(side), -rad_to_deg(up)) * 9.0, violent)
 	bloom = minf(bloom + 0.01, 0.06)
-	shot_audio.pitch_scale = randf_range(0.94, 1.06)
+	shot_audio.pitch_scale = randf_range(0.94, 1.06) * sound_pitch
 	shot_audio.play()
 	_update_ammo_hud()
 	if ammo == 0 and reserve > 0:

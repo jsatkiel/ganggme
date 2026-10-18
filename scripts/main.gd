@@ -1,6 +1,8 @@
 extends Node3D
 ## Game setup and the rules for both modes: team deathmatch (you vs. the bots, first to KILLS_TO_WIN) and
-## King of the Hood (8 v 8, hold the green circle in the middle of the lot for HOLD_TIME, best of 5 rounds).
+## King of the Hood (8 v 8, hold the green circle in the middle of the lot for HOLD_TIME, best of 7 rounds).
+## In King of the Hood each team carries 2 pistols, 2 shotguns, 2 rifles and 2 SMGs, and every slot moves on to
+## the next gun each round (guns.gd), so in any 4 rounds everyone uses all four.
 
 const InputSetup = preload("res://scripts/input_setup.gd")
 const MapBuilder = preload("res://scripts/map_builder.gd")
@@ -9,6 +11,7 @@ const BotScript = preload("res://scripts/bot.gd")
 const HudScript = preload("res://scripts/hud.gd")
 const PauseMenu = preload("res://scripts/pause_menu.gd")
 const Loadout = preload("res://scripts/loadout.gd")
+const Guns = preload("res://scripts/guns.gd")
 const MODES := {"koth": "KING OF THE HOOD", "tdm": "TEAM DEATHMATCH"}
 
 const BOT_COUNT := 6 # opps
@@ -17,8 +20,11 @@ const KILLS_TO_WIN := 30
 const PLAYER_RESPAWN := 3.0
 const BOT_RESPAWN := 4.0
 # King of the Hood
-const KOTH_TEAM := 4 # per side: 4 v 4 while testing (the laptop drops to 2 FPS at 8 v 8); set back to 8 for launch
-const ROUNDS_TO_WIN := 3 # best of 5
+# per side: 8 v 8, or 4 v 4 with BIG TEAMS off in the settings (the laptop dropped to 2 FPS at 8 v 8 before the
+# bots got cheaper; the 4 v 4 switch is there if it still can't keep up). Each team's 8 slots hold 2 of each gun,
+# so at 4 v 4 that's one of each.
+var koth_team := 8
+const ROUNDS_TO_WIN := 4 # best of 7
 const HOLD_TIME := 5.0 # seconds on the circle in a row, with none of the other team on it
 const HILL := Vector3(0, 0.0, -7) # the grass island in the very middle of the parking lot
 const HILL_RADIUS := 4.5
@@ -73,6 +79,7 @@ func _ready() -> void:
 	if not MODES.has(mode):
 		mode = "koth"
 	var koth := mode == "koth"
+	koth_team = 8 if Loadout.settings.get("big_teams", true) else 4
 	_build_environment()
 	map = MapBuilder.new()
 	map.name = "Map"
@@ -92,20 +99,22 @@ func _ready() -> void:
 	player.respawn(sp, _facing_center(sp))
 	player.invuln = 0.0
 
-	for i in (KOTH_TEAM - 1 if koth else TEAMMATES):
+	for i in (koth_team - 1 if koth else TEAMMATES):
 		var mate = BotScript.new()
 		mate.name = "Mate%d" % i
 		mate.display_name = "TWIN" if i == 0 else "TWIN #%d" % (i + 1)
 		mate.team = 0
+		mate.slot = _slot_for(i + 1)
 		mate.game = self
 		mate.map = map
 		add_child(mate)
 		mate.global_position = _base_slots(0)[i + 1] if koth else sp + Vector3(1.5 + i, 0, 1.0)
 		bots.append(mate)
-	for i in (KOTH_TEAM if koth else BOT_COUNT):
+	for i in (koth_team if koth else BOT_COUNT):
 		var bot = BotScript.new()
 		bot.name = "Bot%d" % i
 		bot.display_name = "OPP #%d" % (i + 1)
+		bot.slot = _slot_for(i)
 		bot.game = self
 		bot.map = map
 		add_child(bot)
@@ -140,6 +149,10 @@ func _ready() -> void:
 		for l in find_children("*", "DirectionalLight3D", true, false): l.shadow_enabled = false
 	if "--half-res" in args:
 		get_viewport().scaling_3d_scale = 0.6
+	if "--gun" in args:
+		# dev: start holding this gun (pistol, shotgun, rifle, smg)
+		player.gun_kind = args[args.find("--gun") + 1]
+		player.respawn(player.global_position, player.rotation.y)
 	if "--screenshot" in args:
 		_take_screenshot(args)
 	if "--model-test" in args:
@@ -252,7 +265,7 @@ func _base_slots(team: int) -> Array:
 	# the spots a side starts in: a tight group, rows of 4, at its end of the map
 	var c: Vector3 = CREW_BASE if team == 0 else OPP_BASE
 	var out := []
-	for i in KOTH_TEAM:
+	for i in koth_team:
 		var p := c + Vector3((i % 4 - 1.5) * 1.8, 0, (floori(i / 4.0) - 0.5) * 1.8)
 		if map._is_blocked(Vector2(p.x, p.z), 0.5):
 			p = c + Vector3(0, 0, (floori(i / 4.0) - 0.5) * 1.8)
@@ -346,13 +359,25 @@ func _koth_tick(delta: float) -> void:
 		_round_won(holder)
 
 
+func _slot_for(i: int) -> int:
+	# which of the 8 gun slots the i-th member of a team fills: at 4 v 4, one of each gun (slots 0, 2, 4, 6)
+	return i if koth_team >= 8 else i * 2
+
+
 func _start_round() -> void:
 	round_num += 1
 	hold_team = -1
 	hold_t = 0.0
 	var crew := _base_slots(0)
 	var opps := _base_slots(1)
+	# hand out this round's guns: each slot moves on to the next category
+	player.gun_kind = Guns.for_slot(_slot_for(0), round_num)
+	for b in bots:
+		b.set_gun(Guns.for_slot(b.slot, round_num))
 	player.respawn(crew[0], _facing_center(crew[0]))
+	print("[game] round %d: you %s, crew %s, opps %s" % [round_num, player.gun_kind,
+		bots.filter(func(b): return b.team == 0).map(func(b): return b.gun_kind),
+		bots.filter(func(b): return b.team == 1).map(func(b): return b.gun_kind)])
 	var ci := 1
 	var oi := 0
 	for b in bots:
@@ -367,7 +392,8 @@ func _start_round() -> void:
 		b.rotation.y = _facing_center(p)
 	hud.update_rounds(round_num, round_wins[0], round_wins[1], ROUNDS_TO_WIN)
 	hud.center_message("ROUND %d
-TAKE THE CIRCLE" % round_num, 2.5)
+TAKE THE CIRCLE
+YOU'VE GOT THE %s" % [round_num, Guns.STATS[player.gun_kind].name if player.gun_kind != "pistol" else "PISTOL"], 3.0)
 	round_live = true
 
 
@@ -440,13 +466,13 @@ func enemies_of(team: int) -> Array:
 
 func _pick_player_spawn() -> Vector3:
 	if mode == "koth":
-		return _base_slots(0)[randi() % KOTH_TEAM]
+		return _base_slots(0)[randi() % koth_team]
 	return _farthest_from(map.player_spawns, enemies_of(0).map(func(b): return b.global_position))
 
 
 func _pick_bot_spawn(bot: Node) -> Vector3:
 	if mode == "koth":
-		return _base_slots(bot.team)[randi() % KOTH_TEAM]
+		return _base_slots(bot.team)[randi() % koth_team]
 	var spots: Array = map.player_spawns if bot.team == 0 else map.bot_spawns + map.player_spawns
 	return _farthest_from(spots, enemies_of(bot.team).map(func(e): return e.global_position))
 
