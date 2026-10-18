@@ -99,6 +99,7 @@ var quality := 0 # auto-quality step from main.gd (0 = full detail)
 var _vignette_flash := 0.0
 var _health := 100.0
 var _center_t := 0.0
+var _fps_t := 0.0
 
 
 func _ready() -> void:
@@ -232,7 +233,10 @@ func _label(font_size: int, align: HorizontalAlignment) -> Label:
 
 
 func _process(delta: float) -> void:
-	fps_label.text = "%d FPS" % Engine.get_frames_per_second() + ("   detail -%d" % quality if quality > 0 else "")
+	_fps_t -= delta
+	if _fps_t <= 0.0: # 4 times a second is plenty
+		_fps_t = 0.25
+		fps_label.text = "%d FPS" % Engine.get_frames_per_second() + ("   detail -%d" % quality if quality > 0 else "")
 	_vignette_flash = move_toward(_vignette_flash, 0.0, delta * 1.5)
 	var low := clampf(1.0 - _health / 100.0, 0.0, 1.0)
 	vignette.color.a = clampf(low * 0.45 + _vignette_flash, 0.0, 0.7)
@@ -292,18 +296,21 @@ func update_hill(team: int, frac: float, contested: bool, standing_on: bool) -> 
 	# who is alone on the circle and how far through the 5 seconds they are
 	hill_fill.size.x = 336.0 * clampf(frac, 0.0, 1.0)
 	hill_fill.color = Color(0.35, 0.65, 1.0) if team == 0 else Color(1, 0.3, 0.25)
+	var text: String
 	if contested:
-		hill_label.text = "CONTESTED"
+		text = "CONTESTED"
 		hill_label.modulate = Color(1, 0.85, 0.3)
 	elif team == 0:
-		hill_label.text = "YOUR CREW TAKING THE HOOD  %.1f" % maxf(5.0 - frac * 5.0, 0.0)
+		text = "YOUR CREW TAKING THE HOOD  %.1f" % maxf(5.0 - frac * 5.0, 0.0)
 		hill_label.modulate = Color(0.55, 0.8, 1.0)
 	elif team == 1:
-		hill_label.text = "OPPS TAKING THE HOOD  %.1f" % maxf(5.0 - frac * 5.0, 0.0)
+		text = "OPPS TAKING THE HOOD  %.1f" % maxf(5.0 - frac * 5.0, 0.0)
 		hill_label.modulate = Color(1, 0.45, 0.4)
 	else:
-		hill_label.text = "ON THE CIRCLE" if standing_on else "GET TO THE GREEN CIRCLE"
+		text = "ON THE CIRCLE" if standing_on else "GET TO THE GREEN CIRCLE"
 		hill_label.modulate = Color(0.5, 1.0, 0.55)
+	if hill_label.text != text:
+		hill_label.text = text
 
 
 func killfeed(text: String, col: Color) -> void:

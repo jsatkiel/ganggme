@@ -5,6 +5,9 @@ const MAX_DECALS := 80
 
 static var _decals: Array = []
 static var _decal_mat: StandardMaterial3D
+static var _decal_mesh: BoxMesh
+static var _puff_mesh: SphereMesh
+static var _puff_mats := {} # color -> material, shared (each puff fades with its own transparency)
 
 
 static func up_for(dir: Vector3) -> Vector3:
@@ -38,10 +41,11 @@ static func impact(root: Node, pos: Vector3, normal: Vector3, puff_col := Color(
 		_decal_mat = StandardMaterial3D.new()
 		_decal_mat.albedo_color = Color(0.06, 0.05, 0.05)
 		_decal_mat.roughness = 1.0
+	if _decal_mesh == null:
+		_decal_mesh = BoxMesh.new()
+		_decal_mesh.size = Vector3(0.08, 0.08, 0.01)
 	var mark := MeshInstance3D.new()
-	var bm := BoxMesh.new()
-	bm.size = Vector3(0.08, 0.08, 0.01)
-	mark.mesh = bm
+	mark.mesh = _decal_mesh
 	mark.material_override = _decal_mat
 	mark.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_OFF
 	root.add_child(mark)
@@ -56,22 +60,25 @@ static func impact(root: Node, pos: Vector3, normal: Vector3, puff_col := Color(
 
 
 static func puff(root: Node, pos: Vector3, col: Color) -> void:
+	if _puff_mesh == null:
+		_puff_mesh = SphereMesh.new()
+		_puff_mesh.radius = 0.07
+		_puff_mesh.height = 0.14
+		_puff_mesh.radial_segments = 8
+		_puff_mesh.rings = 4
+	if not _puff_mats.has(col):
+		var m := StandardMaterial3D.new()
+		m.shading_mode = BaseMaterial3D.SHADING_MODE_UNSHADED
+		m.transparency = BaseMaterial3D.TRANSPARENCY_ALPHA
+		m.albedo_color = col
+		_puff_mats[col] = m
 	var mi := MeshInstance3D.new()
-	var sm := SphereMesh.new()
-	sm.radius = 0.07
-	sm.height = 0.14
-	sm.radial_segments = 8
-	sm.rings = 4
-	mi.mesh = sm
-	var m := StandardMaterial3D.new()
-	m.shading_mode = BaseMaterial3D.SHADING_MODE_UNSHADED
-	m.transparency = BaseMaterial3D.TRANSPARENCY_ALPHA
-	m.albedo_color = col
-	mi.material_override = m
+	mi.mesh = _puff_mesh
+	mi.material_override = _puff_mats[col]
 	mi.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_OFF
 	root.add_child(mi)
 	mi.global_position = pos
 	var tw := mi.create_tween().set_parallel(true)
 	tw.tween_property(mi, "scale", Vector3.ONE * 3.0, 0.3)
-	tw.tween_property(m, "albedo_color:a", 0.0, 0.3)
+	tw.tween_property(mi, "transparency", 1.0, 0.3)
 	tw.chain().tween_callback(mi.queue_free)

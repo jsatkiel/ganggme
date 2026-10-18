@@ -57,6 +57,7 @@ func _ready() -> void:
 	col_shape.position.y = 0.925
 	add_child(col_shape)
 	_build_model()
+	think_t = randf() * 0.15 # bots think on different frames, not all at once
 	shot_audio = AudioStreamPlayer3D.new()
 	shot_audio.stream = preload("res://assets/audio/pistol_far.wav")
 	shot_audio.unit_size = 6.0 # full volume up close, fading with distance
@@ -237,15 +238,13 @@ func _pick_waypoint() -> void:
 			waypoint = spot
 			has_waypoint = true
 			return
-	var best := Vector3.ZERO
-	var found := false
-	var best_score := INF
+	# score the candidates first (cheap), then ray-check only the best few until one is clear,
+	# instead of a raycast for every candidate
+	var cands := []
 	for i in (40 if hill != Vector3.INF else 14):
 		var w: Vector3 = pts[randi() % pts.size()]
 		var d := _flat_dist(w)
 		if d < 5.0 or d > (40.0 if hill != Vector3.INF else 32.0):
-			continue
-		if not _clear_line(global_position + Vector3(0, 0.9, 0), w + Vector3(0, 0.9, 0), 1 | 2):
 			continue
 		# lean toward the player so fights actually happen
 		var score := randf() * (6.0 if hill != Vector3.INF else 30.0) # rushing the circle: take the step that gets closest
@@ -253,10 +252,15 @@ func _pick_waypoint() -> void:
 			score += w.distance_to(hill) * 1.4 # King of the Hood: everyone pushes the circle
 		elif p:
 			score += w.distance_to(p.global_position) * 0.6
-		if score < best_score:
-			best_score = score
-			best = w
+		cands.append([score, w])
+	cands.sort_custom(func(a, b): return a[0] < b[0])
+	var best := Vector3.ZERO
+	var found := false
+	for c in cands.slice(0, 6):
+		if _clear_line(global_position + Vector3(0, 0.9, 0), c[1] + Vector3(0, 0.9, 0), 1 | 2):
+			best = c[1]
 			found = true
+			break
 	if found:
 		waypoint = best
 		has_waypoint = true
