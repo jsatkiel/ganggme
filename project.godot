@@ -21,6 +21,6 @@ window/size/viewport_height=900
 
 [rendering]
 
-anti_aliasing/quality/screen_space_aa=1
 scaling_3d/mode=1
 scaling_3d/scale=0.75
+anti_aliasing/quality/screen_space_aa=1
