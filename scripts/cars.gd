@@ -16,8 +16,6 @@ const CITY_COLORS := ["Black", "Blue", "Brown", "IceBlue", "OliveGreen", "Red", 
 # texture, "keep" leaves the model's own look. tex: texture set to apply to every surface.
 const MODELS := {
 	"hatchback": {"file": "hatchback/hatchback.glb", "length": 4.25, "paint": "body:carpaint"},
-	"redcar": {"file": "redcar/RedCar.fbx", "length": 4.6, "paint": "parts"}, # plain white materials named by part
-	"muscle": {"file": "muscle/MUSCLE_CAR.fbx", "length": 5.0, "paint": "keep"},
 	"si5": {"file": "si5/si5LOD0.fbx", "length": 4.5, "paint": "body:Car Paint", "hide": "logos"},
 	"citycar": {"file": "citycar03/CityCar03.fbx", "length": 5.2, "paint": "city"},
 	"carfree02": {"file": "carfree02/Car_Free_02.fbx", "length": 4.9, "paint": "keep", "tex": "carfree02"},

@@ -6,6 +6,7 @@ const Fx = preload("res://scripts/fx.gd")
 const Pistol = preload("res://scripts/pistol.gd")
 const MuzzleFlash = preload("res://scripts/muzzle_flash.gd")
 const CrewModel = preload("res://scripts/crew_model.gd")
+const Loadout = preload("res://scripts/loadout.gd")
 const CREW_COLOR := Color(0.1, 0.25, 0.75) # placeholder: your crew wears blue
 
 # movement
@@ -71,6 +72,23 @@ var invuln := 0.0
 
 var ammo := MAG_SIZE
 var reserve := START_RESERVE
+# the equipped class (Loadout.stats), set by apply_loadout on every spawn
+var weapon_name := "GLOCK 17"
+var mag_size := MAG_SIZE
+var reserve_max := START_RESERVE
+var fire_interval := FIRE_INTERVAL
+var reload_time := RELOAD_TIME
+var damage := DAMAGE
+var recoil_mult := 1.0
+var spread_mult := 1.0
+var speed_mult := 1.0
+var sprint_mult := 1.0
+var regen_bonus := 0.0
+var flash_size := 1.0
+var hip_fov := HIP_FOV
+var laser_on := true # T / D-pad left switches the laser sight's beam on and off
+var laser_beam: MeshInstance3D # set when the laser sight is equipped
+var laser_dot: MeshInstance3D
 var fire_cd := 0.0
 var reloading := false
 var reload_t := 0.0
@@ -78,6 +96,11 @@ var ads := 0.0
 var bloom := 0.0
 var current_spread := 0.0
 var kick := 0.0
+var fire_queued := 0.0 # single fire: a trigger pull waits this long for the gun to be ready
+var elbow_bend := 0.0 # radians the elbow is folded by the last shot, springing back
+var _elbow := -1 # forearm bone of the first-person arms, and its fitted pose
+var _elbow_rest := Quaternion.IDENTITY
+var _elbow_axis := Vector3.RIGHT # the elbow's hinge, in the upper arm's space
 
 var sprinting := false
 var crouching := false
@@ -106,16 +129,58 @@ func _ready() -> void:
 	head.position.y = STAND_HEIGHT - 0.18
 	add_child(head)
 	camera = Camera3D.new()
-	camera.fov = HIP_FOV
+	camera.fov = hip_fov
 	camera.near = 0.03
 	camera.far = 600.0
 	head.add_child(camera)
 	camera.make_current()
 	_build_weapon()
 
-	shot_audio = _audio(Sfx.gunshot(), -6.0, 8)
-	tick_audio = _audio(Sfx.hit_tick(), -4.0, 4)
+	shot_audio = _audio(preload("res://assets/audio/pistol_fp.wav"), -4.0, 8)
+	tick_audio = _audio(Sfx.hit_tick(), -14.0, 4)
 	hurt_audio = _audio(Sfx.hurt(), -2.0, 2)
+
+
+func invert_sign() -> float:
+	return -1.0 if Loadout.settings.invert else 1.0
+
+
+func apply_settings() -> void:
+	hip_fov = Loadout.settings.fov
+	AudioServer.set_bus_volume_db(0, linear_to_db(maxf(Loadout.settings.volume, 0.001)))
+	if hud:
+		hud.fps_label.visible = Loadout.settings.fps
+
+
+func apply_loadout() -> void:
+	# the active class from the pause menu: the pistol's numbers, attachments, perks and camo
+	var c := Loadout.current()
+	var s := Loadout.stats(c)
+	weapon_name = s.name
+	mag_size = s.mag
+	reserve_max = s.reserve
+	fire_interval = s.interval
+	reload_time = s.reload
+	damage = s.damage
+	recoil_mult = s.recoil
+	spread_mult = s.spread
+	speed_mult = s.mobility * s.speed
+	sprint_mult = s.sprint
+	regen_bonus = s.regen
+	flash_size = s.flash
+	if ResourceLoader.exists(s.sound):
+		shot_audio.stream = load(s.sound)
+	shot_audio.volume_db = -4.0 + s.volume
+	var parts := {}
+	for slot in Loadout.SLOTS:
+		parts[slot] = c[slot]
+	if arms and arms.gun:
+		Pistol.dress(arms.gun, Loadout.camo(c.camo), parts)
+		laser_beam = null
+		for n in arms.gun.get_children():
+			if n.has_meta("beam"):
+				laser_beam = n
+	apply_settings()
 
 
 func _audio(stream: AudioStream, db: float, poly: int) -> AudioStreamPlayer:
@@ -156,17 +221,51 @@ func _mat(c: Color, rough: float) -> StandardMaterial3D:
 
 
 func _unhandled_input(event: InputEvent) -> void:
-	if event.is_action_pressed("pause"):
-		Input.mouse_mode = Input.MOUSE_MODE_VISIBLE
-		return
 	if event is InputEventMouseButton and event.pressed and Input.mouse_mode != Input.MOUSE_MODE_CAPTURED:
 		Input.mouse_mode = Input.MOUSE_MODE_CAPTURED
 		get_viewport().set_input_as_handled()
 		return
 	if event is InputEventMouseMotion and Input.mouse_mode == Input.MOUSE_MODE_CAPTURED and alive:
-		var sens := MOUSE_SENS * lerpf(1.0, 0.6, ads)
+		var sens: float = MOUSE_SENS * Loadout.settings.sens * lerpf(1.0, 0.6, ads)
 		rotate_y(-event.relative.x * sens)
-		pitch = clampf(pitch - event.relative.y * sens, deg_to_rad(-88), deg_to_rad(88))
+		pitch = clampf(pitch - event.relative.y * sens * invert_sign(), deg_to_rad(-88), deg_to_rad(88))
+
+
+func _process(_delta: float) -> void:
+	_update_laser()
+
+
+func _update_laser() -> void:
+	# stretch the beam out to whatever it points at and put the red dot there
+	var on := laser_beam != null and is_instance_valid(laser_beam) and laser_on and alive
+	if laser_beam and is_instance_valid(laser_beam):
+		laser_beam.visible = on
+	if laser_dot == null:
+		laser_dot = MeshInstance3D.new()
+		var sm := SphereMesh.new()
+		sm.radius = 0.025
+		sm.height = 0.05
+		laser_dot.mesh = sm
+		var m := StandardMaterial3D.new()
+		m.shading_mode = BaseMaterial3D.SHADING_MODE_UNSHADED
+		m.albedo_color = Color(1, 0.15, 0.1)
+		laser_dot.material_override = m
+		laser_dot.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_OFF
+		laser_dot.top_level = true
+		add_child(laser_dot)
+	laser_dot.visible = false
+	if not on:
+		return
+	var from := laser_beam.global_position
+	var dir := -laser_beam.global_basis.z.normalized()
+	var q := PhysicsRayQueryParameters3D.create(from, from + dir * 90.0, 1 | 4, [get_rid()])
+	var hit := get_world_3d().direct_space_state.intersect_ray(q)
+	var d := 90.0
+	if not hit.is_empty():
+		d = from.distance_to(hit.position)
+		laser_dot.global_position = hit.position - dir * 0.02
+		laser_dot.visible = true
+	laser_beam.scale.z = d / maxf(laser_beam.get_parent().global_basis.z.length(), 0.001)
 
 
 func _physics_process(delta: float) -> void:
@@ -187,9 +286,9 @@ func _look(delta: float) -> void:
 	var look := Input.get_vector("look_left", "look_right", "look_up", "look_down")
 	if look.length() > 0.0:
 		look *= look.length() # response curve: fine aim near center, fast turns at full tilt
-		var s := STICK_SENS * lerpf(1.0, 0.5, ads) * delta
+		var s: float = STICK_SENS * Loadout.settings.stick * lerpf(1.0, 0.5, ads) * delta
 		rotate_y(-look.x * s)
-		pitch = clampf(pitch - look.y * s * 0.75, deg_to_rad(-88), deg_to_rad(88))
+		pitch = clampf(pitch - look.y * s * 0.75 * invert_sign(), deg_to_rad(-88), deg_to_rad(88))
 	# recoil recovery: pull back down (and part of the way back across) from the kick
 	if recoil_left > 0.0:
 		var r := minf(recoil_left, 3.0 * delta)
@@ -245,9 +344,9 @@ func _move(delta: float) -> void:
 		if slide_t <= 0.0:
 			sliding = false
 	else:
-		var speed := WALK_SPEED
+		var speed := WALK_SPEED * speed_mult
 		if sprinting:
-			speed = SPRINT_SPEED
+			speed = SPRINT_SPEED * speed_mult * sprint_mult
 		elif crouching:
 			speed = CROUCH_SPEED
 		if ads > 0.5:
@@ -279,20 +378,28 @@ func _weapon_update(delta: float) -> void:
 
 	var want_ads := (Input.is_action_pressed("aim") or force_ads) and not sprinting and not reloading and not sliding
 	ads = move_toward(ads, 1.0 if want_ads else 0.0, delta * 6.0)
-	camera.fov = lerpf(HIP_FOV, ADS_FOV, ads)
+	camera.fov = lerpf(hip_fov, ADS_FOV, ads)
 
 	if reloading:
 		reload_t -= delta
 		if reload_t <= 0.0:
-			var take := mini(MAG_SIZE - ammo, reserve)
+			var take := mini(mag_size - ammo, reserve)
 			ammo += take
 			reserve -= take
 			reloading = false
 			_update_ammo_hud()
-	elif Input.is_action_just_pressed("reload") and ammo < MAG_SIZE and reserve > 0:
+	elif Input.is_action_just_pressed("reload") and ammo < mag_size and reserve > 0:
 		_start_reload()
 
-	if Input.is_action_pressed("fire") and fire_cd <= 0.0 and not reloading and not sprinting:
+	if Input.is_action_just_pressed("laser") and laser_beam:
+		laser_on = not laser_on
+
+	# single fire: one shot per trigger pull (a pull just before the gun is ready still counts)
+	if Input.is_action_just_pressed("fire"):
+		fire_queued = 0.2
+	fire_queued -= delta
+	if fire_queued > 0.0 and fire_cd <= 0.0 and not reloading and not sprinting:
+		fire_queued = 0.0
 		if ammo > 0:
 			_shoot()
 		elif reserve > 0:
@@ -305,7 +412,7 @@ func _weapon_update(delta: float) -> void:
 		hip += 0.05
 	if crouching:
 		hip *= 0.75
-	current_spread = lerpf(hip, 0.002 + bloom * 0.15, ads)
+	current_spread = lerpf(hip * spread_mult, 0.002 + bloom * 0.15, ads)
 	if hud:
 		hud.set_spread(current_spread, ads)
 
@@ -321,7 +428,7 @@ func _weapon_update(delta: float) -> void:
 		target += Vector3(-0.05, -0.06, 0.05)
 		rot = Vector3(-0.3, 0.6, 0.2)
 	if reloading:
-		var p := 1.0 - absf((reload_t / RELOAD_TIME) * 2.0 - 1.0)
+		var p := 1.0 - absf((reload_t / reload_time) * 2.0 - 1.0)
 		target.y -= 0.12 * p
 		rot.x -= 0.6 * p
 		rot.z += 0.5 * p
@@ -333,17 +440,21 @@ func _weapon_update(delta: float) -> void:
 	gun_bounce_pos = gun_bounce_pos.lerp(Vector3.ZERO, clampf(16.0 * delta, 0.0, 1.0))
 	weapon.position = _gun_pos + gun_bounce_pos
 	weapon.rotation = _gun_rot + gun_bounce_rot
+	# the elbow folds with the kick and springs back out
+	elbow_bend = lerpf(elbow_bend, 0.0, clampf(11.0 * delta, 0.0, 1.0))
+	if _elbow >= 0:
+		arms.anim_skeleton.set_bone_pose_rotation(_elbow, Quaternion(_elbow_axis, elbow_bend) * _elbow_rest)
 
 
 func _start_reload() -> void:
 	reloading = true
-	reload_t = RELOAD_TIME
+	reload_t = reload_time
 	sprinting = false
 	_update_ammo_hud()
 
 
 func _shoot() -> void:
-	fire_cd = FIRE_INTERVAL
+	fire_cd = fire_interval
 	ammo -= 1
 	var basis_cam := camera.global_transform.basis
 	var forward := -basis_cam.z
@@ -360,7 +471,7 @@ func _shoot() -> void:
 			pass # your teammate: no friendly fire
 		elif col.has_method("take_damage"):
 			var headshot: bool = col.has_method("is_headshot") and col.is_headshot(hit.position)
-			var killed: bool = col.take_damage(DAMAGE * (HEADSHOT_MULT if headshot else 1.0), global_position, self, headshot)
+			var killed: bool = col.take_damage(damage * (HEADSHOT_MULT if headshot else 1.0), global_position, self, headshot)
 			Fx.puff(root, hit.position, Color(0.6, 0.1, 0.1))
 			tick_audio.play()
 			if hud:
@@ -370,20 +481,28 @@ func _shoot() -> void:
 
 	# recoil: every shot throws the aim a different way, mostly up with a random left/right jolt; most of it
 	# recovers, the rest stacks up, so a quick string of shots climbs and wanders like a real pistol
-	# aimed: 0.78, moving or not; from the hip: 1.2 standing still, up to 1.5x that on the move (full at walking pace or in the air)
+	# aimed: 0.78, moving or not; from the hip: 1.8 standing still, up to 1.5x that on the move (full at walking pace or in the air)
 	var moving := 1.0 if not is_on_floor() else clampf(Vector2(velocity.x, velocity.z).length() / WALK_SPEED, 0.0, 1.0)
-	var steady := lerpf(1.2 * lerpf(1.0, 1.5, moving), 0.78, ads)
+	var steady := lerpf(1.8 * lerpf(1.0, 1.5, moving), 0.78, ads) * recoil_mult
+	if laser_beam and laser_on:
+		steady *= lerpf(0.75, 1.0, ads) # the laser only helps from the hip
 	var up := deg_to_rad(randf_range(1.1, 2.0)) * steady
 	var side := deg_to_rad(randf_range(-1.1, 1.1)) * steady
 	pitch = clampf(pitch + up, deg_to_rad(-88), deg_to_rad(88))
 	rotate_y(side)
 	recoil_left += up * 0.7
 	recoil_side += side * 0.5
-	# the gun itself bounces: a random tilt, twist and shove each shot, settling fast
+	# the gun itself bounces: a random tilt, twist and shove each shot, settling fast; from the hip it jumps
+	# harder still and the elbow folds with it
+	var violent := steady * lerpf(1.4, 1.0, ads)
 	kick = 1.0
-	flash.fire()
-	gun_bounce_rot = Vector3(randf_range(0.10, 0.20), randf_range(-0.09, 0.09), randf_range(-0.16, 0.16)) * steady
-	gun_bounce_pos = Vector3(randf_range(-0.014, 0.014), randf_range(0.004, 0.014), 0.0) * steady
+	if flash_size > 0.0:
+		flash.fire(lerpf(1.0, 2.0, ads) * flash_size)
+	gun_bounce_rot = Vector3(randf_range(0.10, 0.20), randf_range(-0.09, 0.09), randf_range(-0.16, 0.16)) * violent
+	gun_bounce_pos = Vector3(randf_range(-0.014, 0.014), randf_range(0.004, 0.014), randf_range(0.0, 0.02)) * violent
+	elbow_bend = deg_to_rad(randf_range(7.0, 11.0)) * violent * lerpf(1.0, 0.35, ads)
+	if hud:
+		hud.kick_crosshair(Vector2(rad_to_deg(side), -rad_to_deg(up)) * 9.0, violent)
 	bloom = minf(bloom + 0.01, 0.06)
 	shot_audio.pitch_scale = randf_range(0.94, 1.06)
 	shot_audio.play()
@@ -394,7 +513,7 @@ func _shoot() -> void:
 
 func _regen(delta: float) -> void:
 	since_damage += delta
-	if since_damage > REGEN_DELAY and health < MAX_HEALTH:
+	if since_damage > REGEN_DELAY + regen_bonus and health < MAX_HEALTH:
 		health = minf(MAX_HEALTH, health + REGEN_RATE * delta)
 		if hud:
 			hud.update_health(health)
@@ -402,7 +521,7 @@ func _regen(delta: float) -> void:
 
 func _update_ammo_hud() -> void:
 	if hud:
-		hud.update_ammo(ammo, reserve, reloading)
+		hud.update_ammo(ammo, reserve, reloading, weapon_name)
 
 
 func take_damage(amount: float, from_pos: Vector3, attacker: Node = null, _headshot := false) -> bool:
@@ -439,16 +558,19 @@ func _die(attacker: Node) -> void:
 
 
 func respawn(pos: Vector3, facing: float) -> void:
+	apply_loadout() # a new class picked in the pause menu goes on here
 	global_position = pos
 	rotation.y = facing
 	velocity = Vector3.ZERO
 	pitch = 0.0
 	recoil_left = 0.0
 	recoil_side = 0.0
+	elbow_bend = 0.0
+	fire_queued = 0.0
 	health = MAX_HEALTH
 	since_damage = 99.0
-	ammo = MAG_SIZE
-	reserve = START_RESERVE
+	ammo = mag_size
+	reserve = reserve_max
 	reloading = false
 	crouching = false
 	sliding = false
@@ -490,6 +612,14 @@ func _fit_arms() -> void:
 	await get_tree().process_frame
 	_align_gun()
 	weapon.transform = keep
+	# remember the fitted elbow, and its hinge: across the upper arm and forearm (turning about it folds the arm)
+	var fore := sk.get_bone_parent(hand)
+	var upper := sk.get_bone_parent(fore)
+	var u := sk.get_bone_global_pose(fore).origin - sk.get_bone_global_pose(upper).origin
+	var fv := sk.get_bone_global_pose(hand).origin - sk.get_bone_global_pose(fore).origin
+	_elbow_axis = (sk.get_bone_global_pose(upper).basis.inverse() * u.cross(fv)).normalized()
+	_elbow_rest = sk.get_bone_pose_rotation(fore)
+	_elbow = fore
 
 
 func _straighten_wrist() -> void:

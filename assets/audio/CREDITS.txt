@@ -1,0 +1,7 @@
+Gunshots from The Free Firearm Sound Library (opengameart.org/content/the-free-firearm-sound-library), CC0 public domain.
+Single shots cut from the Ruger Single Six recordings:
+pistol_fp.wav  - S_14P (near distance), your own pistol in first person
+pistol_far.wav - S_11P (mid distance), everyone else's shots, louder the closer they are
+snub38.wav     - Smith & Wesson 642, V_27P (near distance), .38 Snub loadout pistol
+compact380.wav - Bersa, F_47P (near distance), .380 Compact loadout pistol
+ppq.wav        - Walther PPQ, X_39P (near distance), PPQ 9mm loadout pistol

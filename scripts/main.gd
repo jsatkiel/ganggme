@@ -1,17 +1,30 @@
 extends Node3D
-## Game setup and team-deathmatch rules: you vs. the bots, first to KILLS_TO_WIN.
+## Game setup and the rules for both modes: team deathmatch (you vs. the bots, first to KILLS_TO_WIN) and
+## King of the Hood (8 v 8, hold the green circle in the middle of the lot for HOLD_TIME, best of 5 rounds).
 
 const InputSetup = preload("res://scripts/input_setup.gd")
 const MapBuilder = preload("res://scripts/map_builder.gd")
 const PlayerScript = preload("res://scripts/player.gd")
 const BotScript = preload("res://scripts/bot.gd")
 const HudScript = preload("res://scripts/hud.gd")
+const PauseMenu = preload("res://scripts/pause_menu.gd")
+const Loadout = preload("res://scripts/loadout.gd")
+const MODES := {"koth": "KING OF THE HOOD", "tdm": "TEAM DEATHMATCH"}
 
 const BOT_COUNT := 6 # opps
 const TEAMMATES := 1 # bots on your crew
 const KILLS_TO_WIN := 30
 const PLAYER_RESPAWN := 3.0
 const BOT_RESPAWN := 4.0
+# King of the Hood
+const KOTH_TEAM := 4 # per side: 4 v 4 while testing (the laptop drops to 2 FPS at 8 v 8); set back to 8 for launch
+const ROUNDS_TO_WIN := 3 # best of 5
+const HOLD_TIME := 5.0 # seconds on the circle in a row, with none of the other team on it
+const HILL := Vector3(0, 0.0, -7) # the grass island in the very middle of the parking lot
+const HILL_RADIUS := 4.5
+const CREW_BASE := Vector3(0, 0.2, 48) # both 55 m from the circle, on opposite sides (south by the gate, north)
+const OPP_BASE := Vector3(0, 0.2, -62)
+const ROUND_BREAK := 4.0
 
 # auto quality: frame cost swings with the view (the 940MX holds 60 looking down the street but not
 # across a lawn full of cut-out grass), so ease detail off when frames run long and bring it back after
@@ -33,6 +46,16 @@ var bots: Array = []
 var kills := 0
 var deaths := 0
 var match_over := false
+var mode: String = "koth"
+var round_num := 0
+var round_wins := [0, 0] # [your crew, opps]
+var round_live := false
+var hold_team := -1 # who is alone on the circle right now (-1: nobody, or both)
+var hold_t := 0.0
+var hill_node: Node3D
+var _hill_mat: StandardMaterial3D
+var _ring_mat: StandardMaterial3D
+var _hill_light: OmniLight3D
 var env: Environment
 var sun: DirectionalLight3D
 var auto_quality := true
@@ -45,6 +68,11 @@ var _fast_t := 0.0
 func _ready() -> void:
 	randomize()
 	InputSetup.setup()
+	Loadout.load_all()
+	mode = Loadout.settings.get("mode", "koth")
+	if not MODES.has(mode):
+		mode = "koth"
+	var koth := mode == "koth"
 	_build_environment()
 	map = MapBuilder.new()
 	map.name = "Map"
@@ -60,11 +88,11 @@ func _ready() -> void:
 	player.hud = hud
 	add_child(player)
 	hud.player = player
-	var sp := _pick_player_spawn()
+	var sp: Vector3 = _base_slots(0)[0] if koth else _pick_player_spawn()
 	player.respawn(sp, _facing_center(sp))
 	player.invuln = 0.0
 
-	for i in TEAMMATES:
+	for i in (KOTH_TEAM - 1 if koth else TEAMMATES):
 		var mate = BotScript.new()
 		mate.name = "Mate%d" % i
 		mate.display_name = "TWIN" if i == 0 else "TWIN #%d" % (i + 1)
@@ -72,20 +100,33 @@ func _ready() -> void:
 		mate.game = self
 		mate.map = map
 		add_child(mate)
-		mate.global_position = sp + Vector3(1.5 + i, 0, 1.0)
+		mate.global_position = _base_slots(0)[i + 1] if koth else sp + Vector3(1.5 + i, 0, 1.0)
 		bots.append(mate)
-	for i in BOT_COUNT:
+	for i in (KOTH_TEAM if koth else BOT_COUNT):
 		var bot = BotScript.new()
 		bot.name = "Bot%d" % i
 		bot.display_name = "OPP #%d" % (i + 1)
 		bot.game = self
 		bot.map = map
 		add_child(bot)
-		bot.global_position = map.bot_spawns[i % map.bot_spawns.size()]
+		bot.global_position = _base_slots(1)[i] if koth else map.bot_spawns[i % map.bot_spawns.size()]
 		bots.append(bot)
+	if koth:
+		for b in bots:
+			b.rotation.y = _facing_center(b.global_position)
+		_build_hill()
 
-	hud.update_score(kills, deaths, KILLS_TO_WIN)
-	hud.center_message("DEFEND THE BLOCK", 3.0)
+	var menu := PauseMenu.new() # Esc / Start: pause, loadout, settings
+	menu.game = self
+	menu.player = player
+	add_child(menu)
+
+	if koth:
+		hud.show_hill(true)
+		_start_round()
+	else:
+		hud.update_score(kills, deaths, KILLS_TO_WIN)
+		hud.center_message("DEFEND THE BLOCK", 3.0)
 	Input.mouse_mode = Input.MOUSE_MODE_CAPTURED
 
 	var args := OS.get_cmdline_user_args()
@@ -201,6 +242,149 @@ func _process(delta: float) -> void:
 		get_tree().reload_current_scene()
 	if auto_quality:
 		_auto_quality(delta)
+	if mode == "koth" and hill_node:
+		_koth_tick(delta)
+
+
+# ---------------------------------------------------------------- King of the Hood
+
+func _base_slots(team: int) -> Array:
+	# the spots a side starts in: a tight group, rows of 4, at its end of the map
+	var c: Vector3 = CREW_BASE if team == 0 else OPP_BASE
+	var out := []
+	for i in KOTH_TEAM:
+		var p := c + Vector3((i % 4 - 1.5) * 1.8, 0, (floori(i / 4.0) - 0.5) * 1.8)
+		if map._is_blocked(Vector2(p.x, p.z), 0.5):
+			p = c + Vector3(0, 0, (floori(i / 4.0) - 0.5) * 1.8)
+		out.append(p)
+	return out
+
+
+func _build_hill() -> void:
+	# the glowing green circle on the grass island in the middle of the lot
+	hill_node = Node3D.new()
+	hill_node.name = "Hill"
+	add_child(hill_node)
+	hill_node.global_position = HILL + Vector3(0, 0.035, 0)
+	_hill_mat = StandardMaterial3D.new()
+	_hill_mat.shading_mode = BaseMaterial3D.SHADING_MODE_UNSHADED
+	_hill_mat.transparency = BaseMaterial3D.TRANSPARENCY_ALPHA
+	_hill_mat.albedo_color = Color(0.2, 1.0, 0.35, 0.22)
+	_hill_mat.cull_mode = BaseMaterial3D.CULL_DISABLED
+	var disc := CylinderMesh.new()
+	disc.top_radius = HILL_RADIUS
+	disc.bottom_radius = HILL_RADIUS
+	disc.height = 0.02
+	disc.radial_segments = 48
+	var dmi := MeshInstance3D.new()
+	dmi.mesh = disc
+	dmi.material_override = _hill_mat
+	dmi.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_OFF
+	hill_node.add_child(dmi)
+	_ring_mat = StandardMaterial3D.new()
+	_ring_mat.albedo_color = Color(0.25, 1.0, 0.4)
+	_ring_mat.emission_enabled = true
+	_ring_mat.emission = Color(0.2, 1.0, 0.35)
+	_ring_mat.emission_energy_multiplier = 3.0
+	var ring := TorusMesh.new()
+	ring.inner_radius = HILL_RADIUS - 0.14
+	ring.outer_radius = HILL_RADIUS
+	ring.rings = 64
+	ring.ring_segments = 8
+	var rmi := MeshInstance3D.new()
+	rmi.mesh = ring
+	rmi.material_override = _ring_mat
+	rmi.scale = Vector3(1, 0.5, 1)
+	rmi.position.y = 0.03
+	rmi.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_OFF
+	hill_node.add_child(rmi)
+	_hill_light = OmniLight3D.new()
+	_hill_light.light_color = Color(0.3, 1.0, 0.4)
+	_hill_light.omni_range = HILL_RADIUS + 3.0
+	_hill_light.light_energy = 1.5
+	_hill_light.position.y = 1.2
+	hill_node.add_child(_hill_light)
+
+
+func hill_target() -> Vector3:
+	# where the bots should be heading (Vector3.INF: no circle in this mode)
+	return HILL if mode == "koth" else Vector3.INF
+
+
+func _on_hill(n: Node3D) -> bool:
+	var d := Vector2(n.global_position.x - HILL.x, n.global_position.z - HILL.z)
+	return d.length() < HILL_RADIUS and absf(n.global_position.y - HILL.y) < 2.5
+
+
+func _koth_tick(delta: float) -> void:
+	var on := [0, 0]
+	if round_live and not match_over:
+		if player.alive and _on_hill(player):
+			on[0] += 1
+		for b in bots:
+			if b.alive and _on_hill(b):
+				on[b.team] += 1
+	var holder := -1
+	if on[0] > 0 and on[1] == 0:
+		holder = 0
+	elif on[1] > 0 and on[0] == 0:
+		holder = 1
+	if holder != hold_team: # someone stepped off, or the other side stepped on: the count starts over
+		hold_team = holder
+		hold_t = 0.0
+	if holder >= 0:
+		hold_t += delta
+	var contested: bool = on[0] > 0 and on[1] > 0
+	# the circle breathes, faster and brighter while someone is taking it
+	var t := Time.get_ticks_msec() / 1000.0
+	var pulse := 0.5 + 0.5 * sin(t * (9.0 if holder >= 0 else (14.0 if contested else 2.5)))
+	_hill_mat.albedo_color.a = 0.16 + 0.14 * pulse + (0.12 if holder >= 0 else 0.0)
+	_ring_mat.emission_energy_multiplier = 2.2 + 2.0 * pulse
+	_hill_light.light_energy = 1.0 + 1.2 * pulse
+	hud.update_hill(hold_team, hold_t / HOLD_TIME, contested, player.alive and _on_hill(player))
+	if round_live and holder >= 0 and hold_t >= HOLD_TIME:
+		_round_won(holder)
+
+
+func _start_round() -> void:
+	round_num += 1
+	hold_team = -1
+	hold_t = 0.0
+	var crew := _base_slots(0)
+	var opps := _base_slots(1)
+	player.respawn(crew[0], _facing_center(crew[0]))
+	var ci := 1
+	var oi := 0
+	for b in bots:
+		var p: Vector3
+		if b.team == 0:
+			p = crew[ci % crew.size()]
+			ci += 1
+		else:
+			p = opps[oi % opps.size()]
+			oi += 1
+		b.respawn(p)
+		b.rotation.y = _facing_center(p)
+	hud.update_rounds(round_num, round_wins[0], round_wins[1], ROUNDS_TO_WIN)
+	hud.center_message("ROUND %d
+TAKE THE CIRCLE" % round_num, 2.5)
+	round_live = true
+
+
+func _round_won(team: int) -> void:
+	round_live = false
+	hold_team = -1
+	hold_t = 0.0
+	round_wins[team] += 1
+	hud.update_rounds(round_num, round_wins[0], round_wins[1], ROUNDS_TO_WIN)
+	if round_wins[team] >= ROUNDS_TO_WIN:
+		_end_match(team == 0)
+		return
+	hud.center_message(("YOUR CREW TOOK THE HOOD" if team == 0 else "THE OPPS TOOK THE HOOD") + "
+%d - %d" % [round_wins[0], round_wins[1]], ROUND_BREAK)
+	await get_tree().create_timer(ROUND_BREAK).timeout
+	if not match_over:
+		_start_round()
 
 
 func _auto_quality(delta: float) -> void:
@@ -236,6 +420,9 @@ func _set_quality(level: int) -> void:
 
 
 func _facing_center(pos: Vector3) -> float:
+	if mode == "koth":
+		var h := HILL - pos
+		return atan2(-h.x, -h.z)
 	var d := (Vector3(0, 0, 40) if pos.z > 62.0 else Vector3(0, 0, -10)) - pos
 	return atan2(-d.x, -d.z)
 
@@ -252,10 +439,14 @@ func enemies_of(team: int) -> Array:
 
 
 func _pick_player_spawn() -> Vector3:
+	if mode == "koth":
+		return _base_slots(0)[randi() % KOTH_TEAM]
 	return _farthest_from(map.player_spawns, enemies_of(0).map(func(b): return b.global_position))
 
 
 func _pick_bot_spawn(bot: Node) -> Vector3:
+	if mode == "koth":
+		return _base_slots(bot.team)[randi() % KOTH_TEAM]
 	var spots: Array = map.player_spawns if bot.team == 0 else map.bot_spawns + map.player_spawns
 	return _farthest_from(spots, enemies_of(bot.team).map(func(e): return e.global_position))
 
@@ -278,6 +469,15 @@ func on_bot_killed(bot: Node, headshot: bool, attacker: Node = null) -> void:
 		return
 	var who: String = "YOU" if attacker == player else (attacker.display_name if attacker and "display_name" in attacker else "?")
 	var hs := "   [HEADSHOT]" if headshot else ""
+	if mode == "koth":
+		# kills don't score here, the circle does: back to your side's end after the wait
+		hud.killfeed("%s  dropped  %s%s" % [who, bot.display_name, hs], Color(1, 0.9, 0.5) if attacker == player else (Color(1, 0.35, 0.3) if bot.team == 0 else Color(0.55, 0.75, 1.0)))
+		await get_tree().create_timer(BOT_RESPAWN).timeout
+		if not match_over and is_instance_valid(bot) and not bot.alive:
+			var bp := _pick_bot_spawn(bot)
+			bot.respawn(bp)
+			bot.rotation.y = _facing_center(bp)
+		return
 	if bot.team == 0:
 		# your teammate went down: a point for the opps
 		deaths += 1
@@ -307,6 +507,13 @@ func on_player_died(attacker: Node) -> void:
 	deaths += 1
 	var who: String = attacker.display_name if attacker and "display_name" in attacker else "the opps"
 	hud.killfeed("%s  dropped  YOU" % who, Color(1, 0.35, 0.3))
+	if mode == "koth":
+		hud.center_message("YOU GOT DROPPED", PLAYER_RESPAWN)
+		await get_tree().create_timer(PLAYER_RESPAWN).timeout
+		if not match_over and not player.alive:
+			var ksp := _pick_player_spawn()
+			player.respawn(ksp, _facing_center(ksp))
+		return
 	hud.update_score(kills, deaths, KILLS_TO_WIN)
 	print("[game] player died (%d)" % deaths)
 	if deaths >= KILLS_TO_WIN:
@@ -321,6 +528,13 @@ func on_player_died(attacker: Node) -> void:
 
 func _end_match(won: bool) -> void:
 	match_over = true
+	round_live = false
+	if mode == "koth":
+		var km := "YOU RUN THE HOOD" if won else "THE OPPS RUN THE HOOD"
+		hud.center_message("%s
+%d - %d
+Press ENTER / A to run it back" % [km, round_wins[0], round_wins[1]])
+		return
 	var msg := "YOU RUN THE BLOCK" if won else "THE OPPS TOOK THE BLOCK"
 	hud.center_message("%s\n%d - %d\nPress ENTER / A to run it back" % [msg, kills, deaths])
 

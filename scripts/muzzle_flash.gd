@@ -44,12 +44,12 @@ func _ready() -> void:
 	visible = false
 
 
-func fire() -> void:
+func fire(size := 1.0) -> void:
 	var m := _mats[randi() % _mats.size()]
 	for c in _cards:
 		c.material_override = m
 	_spin.rotation.z = randf() * TAU
-	scale = Vector3.ONE * randf_range(0.85, 1.15)
+	scale = Vector3.ONE * randf_range(0.85, 1.15) * size
 	visible = true
 	_t = SHOW_TIME
 

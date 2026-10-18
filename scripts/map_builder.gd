@@ -87,7 +87,7 @@ func build() -> void:
 	_parking()
 	_props()
 	_snow_piles()
-	if not OS.get_cmdline_user_args().has("--no-grass"):
+	if false: # grass clumps cut by the user (was: unless --no-grass)
 		_grass()
 	_backdrop()
 	_bounds()
@@ -1381,8 +1381,8 @@ func _grass() -> void:
 	card.surface_set_material(0, mat)
 	# the base layer reaches the horizon; a denser layer with long clumps mixed in only draws near the
 	# camera, where it shows (cut-out cards are what cost the most on a laptop GPU)
-	var total := _grass_layer(r, card, 20000, 0.0, 130.0)
-	total += _grass_layer(r, card, 12000, 0.35, 60.0)
+	var total := _grass_layer(r, card, 4000, 0.0, 130.0) # cut to 20% of the clumps
+	total += _grass_layer(r, card, 2400, 0.35, 60.0)
 	print("[map] grass clumps: ", total)
 
 

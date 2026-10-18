@@ -143,6 +143,9 @@ var skeleton: Skeleton3D # the skeleton that is drawn (the male's; the base body
 var anim_skeleton: Skeleton3D # the base body's, which the animations play on
 var tree: AnimationTree # set up by enable_locomotion()
 var twist: SpineTwist
+var retarget: Retarget
+var _awake := true
+var _dead := false # playing the death fall (on the AnimationPlayer, not the tree)
 var _body_root: Node3D
 var _current := ""
 var _leg_yaw := 0.0
@@ -208,6 +211,7 @@ func _build_male() -> void:
 			mi.material_override = _lashes() # eyelashes: cut out by the opacity map
 	_wear_garments()
 	var rt := Retarget.new()
+	retarget = rt
 	skeleton.add_child(rt)
 	rt.setup(anim_skeleton, skeleton, self, first_person)
 	if first_person:
@@ -410,9 +414,10 @@ func play(name: String, blend := 0.2) -> void:
 	if tree:
 		# with locomotion on, the tree runs everything but the death fall
 		var dead := name == "Death01"
-		if dead == not tree.active:
+		if dead == _dead:
 			return
-		tree.active = not dead
+		_dead = dead
+		tree.active = _awake and not dead
 		anim.active = dead
 		_leg_yaw = 0.0
 		twist.angle = 0.0
@@ -494,6 +499,19 @@ func enable_locomotion() -> void:
 		if i >= 0:
 			twist.bones.append(i)
 	skeleton.add_child(twist)
+
+
+func set_awake(on: bool) -> void:
+	# bots off screen stop animating: no AnimationTree, no pose copy (the pose snaps back when they come into view)
+	if on == _awake:
+		return
+	_awake = on
+	if tree:
+		tree.active = on and not _dead
+	if retarget:
+		retarget.active = on
+	if twist:
+		twist.active = on
 
 
 func move(local_velocity: Vector3, aiming: bool, delta: float) -> void:

@@ -58,9 +58,11 @@ func _ready() -> void:
 	add_child(col_shape)
 	_build_model()
 	shot_audio = AudioStreamPlayer3D.new()
-	shot_audio.stream = Sfx.gunshot()
-	shot_audio.unit_size = 14.0
-	shot_audio.volume_db = -3.0
+	shot_audio.stream = preload("res://assets/audio/pistol_far.wav")
+	shot_audio.unit_size = 6.0 # full volume up close, fading with distance
+	shot_audio.max_distance = 220.0
+	shot_audio.attenuation_filter_cutoff_hz = 9000.0 # far shots sound duller
+	shot_audio.volume_db = 2.0
 	shot_audio.max_polyphony = 4
 	shot_audio.position.y = 1.3
 	add_child(shot_audio)
@@ -72,6 +74,14 @@ func _build_model() -> void:
 	model.bandana_color = CREW_COLOR if team == 0 else OPP_COLORS[randi() % OPP_COLORS.size()]
 	add_child(model)
 	model.enable_locomotion()
+	# cheaper bots: they cast no shadows, and stop animating while off screen
+	for gi in model.find_children("*", "GeometryInstance3D", true, false):
+		gi.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_OFF
+	var vis := VisibleOnScreenNotifier3D.new()
+	vis.aabb = AABB(Vector3(-0.7, 0.0, -0.7), Vector3(1.4, 2.1, 1.4))
+	add_child(vis)
+	vis.screen_entered.connect(func(): model.set_awake(true))
+	vis.screen_exited.connect(func(): model.set_awake(false))
 	if model.gun: # muzzle flash at the barrel tip of the gun in its hand
 		flash = MuzzleFlash.new()
 		flash.position = Pistol.MUZZLE
@@ -126,7 +136,13 @@ func _physics_process(delta: float) -> void:
 			strafe_dir = [-1.0, 1.0, 0.0][randi() % 3]
 		var side := to_p.normalized().cross(Vector3.UP)
 		move = side * strafe_dir * STRAFE_SPEED
-		if to_p.length() > 30.0:
+		var hill: Vector3 = game.hill_target() if game and game.has_method("hill_target") else Vector3.INF
+		if hill != Vector3.INF and _flat_dist(hill) > 3.5:
+			# King of the Hood: keep pushing the circle while shooting
+			var to_h := hill - global_position
+			to_h.y = 0
+			move += to_h.normalized() * SPEED * 0.75
+		elif to_p.length() > 30.0:
 			move += to_p.normalized() * SPEED * 0.7
 		react_t -= delta
 		if react_t <= 0.0 and fire_cd <= 0.0:
@@ -213,19 +229,29 @@ func _pick_waypoint() -> void:
 	if pts.is_empty():
 		return
 	var p := _player()
+	var hill: Vector3 = game.hill_target() if game and game.has_method("hill_target") else Vector3.INF
+	if hill != Vector3.INF:
+		# close enough to see the circle: walk onto it, to a random spot off the tree in the middle
+		var spot: Vector3 = hill + Vector3(0, 0.2, 0) + Vector3(randf_range(1.6, 3.6), 0, 0).rotated(Vector3.UP, randf() * TAU)
+		if _clear_line(global_position + Vector3(0, 0.9, 0), spot + Vector3(0, 0.9, 0), 1 | 2):
+			waypoint = spot
+			has_waypoint = true
+			return
 	var best := Vector3.ZERO
 	var found := false
 	var best_score := INF
-	for i in 14:
+	for i in (40 if hill != Vector3.INF else 14):
 		var w: Vector3 = pts[randi() % pts.size()]
 		var d := _flat_dist(w)
-		if d < 5.0 or d > 32.0:
+		if d < 5.0 or d > (40.0 if hill != Vector3.INF else 32.0):
 			continue
 		if not _clear_line(global_position + Vector3(0, 0.9, 0), w + Vector3(0, 0.9, 0), 1 | 2):
 			continue
 		# lean toward the player so fights actually happen
-		var score := randf() * 30.0
-		if p:
+		var score := randf() * (6.0 if hill != Vector3.INF else 30.0) # rushing the circle: take the step that gets closest
+		if hill != Vector3.INF:
+			score += w.distance_to(hill) * 1.4 # King of the Hood: everyone pushes the circle
+		elif p:
 			score += w.distance_to(p.global_position) * 0.6
 		if score < best_score:
 			best_score = score
@@ -241,9 +267,10 @@ func _pick_waypoint() -> void:
 
 func _fire(p: Node3D) -> void:
 	if burst_left <= 0:
-		burst_left = randi_range(3, 6)
+		burst_left = randi_range(2, 5)
 	burst_left -= 1
-	fire_cd = randf_range(0.11, 0.16) if burst_left > 0 else randf_range(0.5, 1.0)
+	# single fire: a trigger pull per shot, so a string of shots is paced, not sprayed
+	fire_cd = randf_range(0.26, 0.4) if burst_left > 0 else randf_range(0.6, 1.1)
 
 	var crouched: bool = p.get("crouching") == true
 	var dist := global_position.distance_to(p.global_position)
