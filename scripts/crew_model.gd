@@ -182,6 +182,9 @@ func _ready() -> void:
 	_add_accessories()
 	for gi in find_children("*", "GeometryInstance3D", true, false):
 		gi.layers = 2 # characters: the wall graffiti decals (layer 1 only) don't paint anyone walking past
+		# always the full mesh: the auto-simplified versions (which the auto detail setting leans on harder
+		# as it drops) collapse the thin skinned legs, and they vanished while walking
+		gi.lod_bias = 100.0
 	if first_person:
 		for n in skeleton.find_children("*", "BoneAttachment3D", false, false):
 			n.visible = false # bandanas: out of view anyway (the gun hangs on the animation skeleton)
