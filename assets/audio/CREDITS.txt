@@ -5,3 +5,11 @@ pistol_far.wav - S_11P (mid distance), everyone else's shots, louder the closer 
 snub38.wav     - Smith & Wesson 642, V_27P (near distance), .38 Snub loadout pistol
 compact380.wav - Bersa, F_47P (near distance), .380 Compact loadout pistol
 ppq.wav        - Walther PPQ, X_39P (near distance), PPQ 9mm loadout pistol
+Long guns (one shot each, the last of a burst so the tail is clean; "near" = your own gun and anyone within 20 m,
+"far" = someone else's further off):
+rifle_near.wav   - AK-47, C_27P (near distance), DRAKO
+rifle_far.wav    - AK-47, C_36P (mid distance), DRAKO
+smg_near.wav     - PPSh, P_34P (near distance), MAK
+smg_far.wav      - PPSh, P_22P (mid distance), MAK
+shotgun_near.wav - Benelli Nova, O_17P (mid distance), RICKY (the same shot as far)
+shotgun_far.wav  - Benelli Nova, O_17P (mid distance), RICKY

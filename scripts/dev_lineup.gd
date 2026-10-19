@@ -1,6 +1,6 @@
 extends SceneTree
 ## Dev: lines up every car in assets/cars2 at real size, all as shipped (no turning), and saves a png.
-const CARS := ["hatchback/hatchback.glb", "redcar/RedCar.fbx", "muscle/MUSCLE_CAR.fbx", "si5/si5LOD0.fbx", "bentley/Bentley_Mulsanne.obj", "sedan_obj/car.obj", "citycar03/CityCar03.fbx", "carfree02/Car_Free_02.fbx", "van/van.obj"]
+const CARS := ["hatchback/hatchback.glb", "si5/si5LOD0.fbx", "carfree02/Car_Free_02.fbx", "van/van.obj"]
 func _init() -> void:
 	var root := Node3D.new()
 	get_root().add_child(root)

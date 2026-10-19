@@ -44,6 +44,9 @@ const HIP_AIM_DIST := 15.0 # hip fire: the barrel points at the crosshair this f
 const ADS_DISTANCE := 0.5 # how far in front of the eye the sights sit when aiming
 const FOREARM_RISE := 12.0 # degrees the forearm climbs from below the screen up to the hand (the wrist bends this much)
 const WEAPON_ADS := Vector3(0.0, 0.0, 0.06)
+const WEAPON_HIP_LONG := Vector3(0.3, -0.14, 0.2) # long guns at the hip: in close at the lower right
+const HIP_TURN_LONG := Vector3(0.05, 0.2, 0.0) # and angled in toward the screen center
+const RIFLE_HIP_VIEW := 40.0 # the rifle at the hip looks as it would through this field of view (pulled in close)
 
 var game: Node
 var hud: CanvasLayer
@@ -51,6 +54,7 @@ var hud: CanvasLayer
 var head: Node3D
 var camera: Camera3D
 var weapon: Node3D
+var view_zoom: Node3D # holds the view model; the rifle at the hip widens it to look pulled in close
 var arms # CrewModel, first-person arms
 var muzzle: Node3D
 var flash # MuzzleFlash
@@ -144,7 +148,7 @@ func _ready() -> void:
 	camera.make_current()
 	_build_weapon()
 
-	shot_audio = _audio(preload("res://assets/audio/pistol_fp.wav"), -4.0, 8)
+	shot_audio = _audio(preload("res://assets/audio/pistol_fp.wav"), 2.0, 8)
 	tick_audio = _audio(Sfx.hit_tick(), -14.0, 4)
 	hurt_audio = _audio(Sfx.hurt(), -2.0, 2)
 
@@ -161,11 +165,12 @@ func apply_settings() -> void:
 
 
 func apply_loadout() -> void:
-	# the active class from the pause menu: the pistol's numbers, attachments, perks and camo
-	var c := Loadout.current()
+	# the loadout for the gun in hand: this round's category in King of the Hood, the equipped loadout in
+	# Team Deathmatch. Its gun's numbers, attachments (pistols), perks and camo
+	if game and game.get("mode") != "koth":
+		gun_kind = Loadout.current().category
+	var c := Loadout.for_kind(gun_kind)
 	var s := Loadout.stats(c)
-	if gun_kind != "pistol":
-		s = _category_stats(gun_kind)
 	weapon_name = s.name
 	mag_size = s.mag
 	reserve_max = s.reserve
@@ -184,37 +189,22 @@ func apply_loadout() -> void:
 	sound_pitch = s.get("sound_pitch", 1.0)
 	if ResourceLoader.exists(s.sound):
 		shot_audio.stream = load(s.sound)
-	shot_audio.volume_db = -4.0 + s.volume
+	shot_audio.volume_db = 2.0 + s.volume # (your own gun: louder than anyone else's, even right next to you)
 	var parts := {}
 	for slot in Loadout.SLOTS:
 		parts[slot] = c[slot]
 	if arms and arms.gun:
-		Pistol.dress(arms.gun, Loadout.camo(c.camo), parts)
-		laser_beam = null
-		for n in arms.gun.get_children():
-			if n.has_meta("beam") and gun_kind == "pistol":
-				laser_beam = n
+		if gun_kind == "pistol":
+			Pistol.dress(arms.gun, Loadout.camo(c.camo), parts)
 		arms.show_gun(gun_kind) # the Glock, or this round's long gun
-		muzzle.position = Guns.MUZZLE.get(gun_kind, Pistol.MUZZLE)
+		Guns.dress(arms.gun, c) # (a long gun's attachments)
+		laser_beam = null # the laser on the gun in hand, if it has one
+		for n in arms.gun.find_children("*", "MeshInstance3D", true, false):
+			if n.has_meta("beam") and n.get_parent().is_visible_in_tree() and (n.get_parent() != arms.gun or gun_kind == "pistol"):
+				laser_beam = n
+		muzzle.position = (Pistol.MUZZLE if gun_kind == "pistol" else Guns.muzzle(gun_kind, c)) - Guns.HAND_SHIFT.get(gun_kind, Vector3.ZERO)
 		_sight_up()
 	apply_settings()
-
-
-func _category_stats(kind: String) -> Dictionary:
-	# a shotgun / rifle / SMG: its own numbers, with your class's perks on top (attachments are pistol-only)
-	var g: Dictionary = Guns.STATS[kind]
-	var s := {"name": g.name, "damage": g.damage, "interval": g.interval, "mag": g.mag, "reserve": g.reserve,
-		"reload": g.reload, "recoil": g.recoil, "spread": g.spread, "mobility": g.mobility, "volume": g.volume,
-		"flash": 1.3, "speed": 1.0, "sprint": 1.0, "regen": 0.0, "sound": "res://assets/audio/pistol_fp.wav",
-		"auto": g.auto, "pellets": g.get("pellets", 1), "cone": g.get("cone", 0.0), "sound_pitch": g.sound_pitch}
-	var c := Loadout.current()
-	for i in Loadout.PERKS.size():
-		var p := Loadout.perk(i, c.perks[i] if i < c.perks.size() else "")
-		for k in ["damage", "reload", "spread", "speed", "sprint"]:
-			if p.has(k):
-				s[k] *= p[k]
-		s.regen += p.get("regen", 0.0)
-	return s
 
 
 func _audio(stream: AudioStream, db: float, poly: int) -> AudioStreamPlayer:
@@ -232,7 +222,9 @@ func _build_weapon() -> void:
 	# sit dead center when aiming down sights
 	weapon = Node3D.new()
 	weapon.position = WEAPON_HIP
-	camera.add_child(weapon)
+	view_zoom = Node3D.new()
+	camera.add_child(view_zoom)
+	view_zoom.add_child(weapon)
 	arms = CrewModel.new()
 	arms.first_person = true
 	arms.bandana_color = CREW_COLOR
@@ -291,16 +283,21 @@ func _update_laser() -> void:
 	laser_dot.visible = false
 	if not on:
 		return
-	var from := laser_beam.global_position
-	var dir := -laser_beam.global_basis.z.normalized()
-	var q := PhysicsRayQueryParameters3D.create(from, from + dir * 90.0, 1 | 4, [get_rid()])
+	# the beam runs from the laser to whatever the crosshair is on (where the hip shots go). A spot on the
+	# crosshair line also stays put on screen when the rifle's view model is drawn pulled in (view_zoom)
+	var eye := camera.global_position
+	var ahead := -camera.global_basis.z.normalized()
+	var q := PhysicsRayQueryParameters3D.create(eye, eye + ahead * 90.0, 1 | 4, [get_rid()])
 	var hit := get_world_3d().direct_space_state.intersect_ray(q)
-	var d := 90.0
+	var target := eye + ahead * 90.0
 	if not hit.is_empty():
-		d = from.distance_to(hit.position)
-		laser_dot.global_position = hit.position - dir * 0.02
+		target = hit.position
+		laser_dot.global_position = hit.position - ahead * 0.02
 		laser_dot.visible = true
-	laser_beam.scale.z = d / maxf(laser_beam.get_parent().global_basis.z.length(), 0.001)
+	var from := laser_beam.global_position
+	var b := Basis.looking_at(target - from)
+	b.z *= from.distance_to(target) # (the beam mesh is 1 unit long, out along -Z)
+	laser_beam.global_transform = Transform3D(b, from)
 
 
 func _physics_process(delta: float) -> void:
@@ -454,11 +451,14 @@ func _weapon_update(delta: float) -> void:
 
 	# weapon pose
 	var hspeed_n := clampf(hspeed / SPRINT_SPEED, 0.0, 1.0)
-	var target := WEAPON_HIP.lerp(WEAPON_ADS, ads)
+	var hip_at := WEAPON_HIP if gun_kind == "pistol" else WEAPON_HIP_LONG
+	var target := hip_at.lerp(WEAPON_ADS, ads)
 	target += Vector3(sin(bob_t) * 0.012, absf(cos(bob_t)) * 0.01, 0) * hspeed_n * (1.0 - ads)
 	target.z += kick * 0.05
 	# point the barrel at the crosshair: tip it in toward the screen center from its spot at the lower right
-	var hip_rot := Vector3(atan2(-WEAPON_HIP.y, HIP_AIM_DIST), atan2(WEAPON_HIP.x, HIP_AIM_DIST), 0.0)
+	var hip_rot := Vector3(atan2(-hip_at.y, HIP_AIM_DIST), atan2(hip_at.x, HIP_AIM_DIST), 0.0)
+	if gun_kind != "pistol":
+		hip_rot += HIP_TURN_LONG
 	var rot := hip_rot * (1.0 - ads)
 	if sprinting:
 		target += Vector3(-0.05, -0.06, 0.05)
@@ -476,6 +476,12 @@ func _weapon_update(delta: float) -> void:
 	gun_bounce_pos = gun_bounce_pos.lerp(Vector3.ZERO, clampf(16.0 * delta, 0.0, 1.0))
 	weapon.position = _gun_pos + gun_bounce_pos
 	weapon.rotation = _gun_rot + gun_bounce_rot
+	# the rifle at the hip is pulled in close: the view model is drawn as it would look through a 40-degree view
+	# (spread out across and up the screen from the center, not in depth), easing back to normal when aiming
+	var k := 1.0
+	if gun_kind == "rifle":
+		k = lerpf(tan(deg_to_rad(hip_fov) * 0.5) / tan(deg_to_rad(RIFLE_HIP_VIEW) * 0.5), 1.0, ads)
+	view_zoom.scale = Vector3(k, k, 1.0)
 	# the elbow folds with the kick and springs back out
 	elbow_bend = lerpf(elbow_bend, 0.0, clampf(11.0 * delta, 0.0, 1.0))
 	if _elbow >= 0:
@@ -677,7 +683,9 @@ func _sight_up() -> void:
 	# difference so its sights sit dead center when aiming instead
 	if _arms_fit == null:
 		return # not fitted yet: _fit_arms calls this when it is
-	arms.transform = Transform3D(Basis.IDENTITY, Vector3(0, Pistol.SIGHT_HEIGHT - Guns.sight_height(gun_kind), 0)) * _arms_fit
+	# (and a red dot raises the sight line to its window)
+	arms.transform = Transform3D(Basis.IDENTITY, Vector3(0, Pistol.SIGHT_HEIGHT - Guns.sight_height(gun_kind, Loadout.for_kind(gun_kind)), 0)
+		+ Guns.HAND_SHIFT.get(gun_kind, Vector3.ZERO)) * _arms_fit # (the hand moves on the grip, the gun stays put)
 
 
 func _straighten_wrist() -> void:

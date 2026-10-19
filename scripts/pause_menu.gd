@@ -7,13 +7,14 @@ extends CanvasLayer
 
 const Loadout = preload("res://scripts/loadout.gd")
 const Pistol = preload("res://scripts/pistol.gd")
+const Guns = preload("res://scripts/guns.gd")
 
 const ACCENT := Color(0.96, 0.76, 0.18)
 const PANEL := Color(0.04, 0.05, 0.06, 0.9)
 const DIM := Color(0.66, 0.68, 0.72)
 const GOOD := Color(0.35, 0.9, 0.4)
 const BAD := Color(0.95, 0.32, 0.25)
-const SLOT_NAMES := {"muzzle": "MUZZLE", "magazine": "MAGAZINE", "laser": "UNDERBARREL", "trigger": "TRIGGER"}
+const SLOT_NAMES := {"optic": "OPTIC", "muzzle": "MUZZLE", "magazine": "MAGAZINE", "laser": "UNDERBARREL", "trigger": "TRIGGER"}
 
 
 class StatBars extends Control:
@@ -104,8 +105,9 @@ func _input(event: InputEvent) -> void:
 			and event.button_index in [JOY_BUTTON_LEFT_SHOULDER, JOY_BUTTON_RIGHT_SHOULDER]:
 		# LB / RB flip through the gunsmith slots
 		get_viewport().set_input_as_handled()
-		var i: int = Loadout.SLOTS.find(_stack[-1][1]) + (1 if event.button_index == JOY_BUTTON_RIGHT_SHOULDER else -1)
-		_stack[-1][1] = Loadout.SLOTS[wrapi(i, 0, Loadout.SLOTS.size())]
+		var slots := Loadout.slots_for(Loadout.classes[_edit].category)
+		var i: int = slots.find(_stack[-1][1]) + (1 if event.button_index == JOY_BUTTON_RIGHT_SHOULDER else -1)
+		_stack[-1][1] = slots[wrapi(i, 0, slots.size())]
 		_focus_index = 0
 		_build()
 
@@ -221,7 +223,8 @@ func _page_main() -> void:
 	col.add_theme_constant_override("separation", 6)
 	_page.add_child(col)
 	var koth: bool = game != null and game.mode == "koth"
-	_add_label(col, "KING OF THE HOOD" if koth else "TEAM DEATHMATCH", 18, ACCENT)
+	var map_id: String = game.map_id if game else "projects"
+	_add_label(col, (game.MAPS[map_id][1] + "  ·  " if game else "") + ("KING OF THE HOOD" if koth else "TEAM DEATHMATCH"), 18, ACCENT)
 	_add_label(col, "PAUSED", 72, Color.WHITE)
 	if game and koth:
 		_add_label(col, "ROUND %d      YOUR CREW  %d   —   %d  OPPS      BEST OF %d" % [game.round_num, game.round_wins[0], game.round_wins[1], game.ROUNDS_TO_WIN * 2 - 1], 18, DIM)
@@ -239,6 +242,15 @@ func _page_main() -> void:
 		Loadout.save_all()
 		get_tree().paused = false
 		get_tree().reload_current_scene()))
+	# map choice: reloads the game on the other map (only that map gets built and loaded)
+	if game:
+		var other_map: String = "brownstone" if map_id == "projects" else "projects"
+		var go_map := _btn(col, "MAP: " + game.MAPS[other_map][1], Callable(), 22)
+		go_map.pressed.connect(func(): _confirm_then(go_map, "map", func():
+			Loadout.settings.map = other_map
+			Loadout.save_all()
+			get_tree().paused = false
+			get_tree().reload_current_scene()))
 	var restart := _btn(col, "RESTART MATCH", Callable(), 22)
 	restart.pressed.connect(func(): _confirm_then(restart, "restart", func():
 		get_tree().paused = false
@@ -247,7 +259,7 @@ func _page_main() -> void:
 	quit.pressed.connect(func(): _confirm_then(quit, "quit", func(): get_tree().quit()))
 	# what you're carrying, bottom right
 	var c := Loadout.current()
-	var eq := _label("EQUIPPED   %s  ·  %s  ·  %s" % [c.name, Loadout.WEAPONS[c.weapon].name, Loadout.camo(c.camo).name], 18, DIM)
+	var eq := _label("EQUIPPED   %s  ·  %s  ·  %s" % [c.name, Loadout.weapon(c.weapon).name, Loadout.camo(c.camo).name], 18, DIM)
 	eq.anchor_left = 1.0
 	eq.anchor_right = 1.0
 	eq.anchor_top = 1.0
@@ -263,7 +275,7 @@ func _page_loadout() -> void:
 	_header("LOADOUT", "PAUSED")
 	var body := _body()
 	var left := _col(body, 340)
-	_section(left, "CUSTOM CLASSES")
+	_section(left, "LOADOUTS")
 	var right := _col(body, 640)
 	for i in Loadout.CLASS_COUNT:
 		var c: Dictionary = Loadout.classes[i]
@@ -272,24 +284,26 @@ func _page_loadout() -> void:
 			_go("class"), 26)
 		b.focus_entered.connect(func(): _class_summary(right, i))
 	_spacer(left, 20)
-	_add_label(left, "Pick a class to edit it.\nEQUIP a class to carry it\n(goes on when you resume).", 17, DIM)
+	_add_label(left, "Pick a loadout to edit it.\nKing of the Hood: each round's gun\nuses its loadout. Team Deathmatch:\nEQUIP one to carry it.", 17, DIM)
 
 
 func _class_summary(panel: VBoxContainer, i: int) -> void:
 	for n in panel.get_children():
 		n.queue_free()
 	var c: Dictionary = Loadout.classes[i]
-	var w: Dictionary = Loadout.WEAPONS[c.weapon]
-	_section(panel, "SIDEARM")
+	var w: Dictionary = Loadout.weapon(c.weapon)
+	_section(panel, c.name)
 	panel.add_child(_art_box("weapons", c.weapon, w.name, Vector2(640, 220)))
 	_add_label(panel, "%s   ·   %s" % [w.name, w.caliber], 26, Color.WHITE)
 	var parts := []
-	for slot in Loadout.SLOTS:
+	for slot in Loadout.slots_for(c.category):
 		var a: Dictionary = Loadout.attachment(slot, c[slot])
 		if a.id != "none":
 			parts.append(a.name)
-	_add_label(panel, "ATTACHMENTS:  " + (", ".join(parts) if not parts.is_empty() else "none"), 18, DIM)
-	_add_label(panel, "CAMO:  " + Loadout.camo(c.camo).name, 18, DIM)
+	if not Loadout.slots_for(c.category).is_empty():
+		_add_label(panel, "ATTACHMENTS:  " + (", ".join(parts) if not parts.is_empty() else "none"), 18, DIM)
+	if c.category == "pistol":
+		_add_label(panel, "CAMO:  " + Loadout.camo(c.camo).name, 18, DIM)
 	var perks := []
 	for p in Loadout.PERKS.size():
 		perks.append(Loadout.perk(p, c.perks[p]).name)
@@ -306,19 +320,21 @@ func _page_class() -> void:
 	_header(c.name, "PAUSED  /  LOADOUT")
 	var body := _body()
 	var left := _col(body, 480)
-	_section(left, "SIDEARM")
-	_btn(left, "%s\n%s  ·  %s" % [Loadout.WEAPONS[c.weapon].name, Loadout.WEAPONS[c.weapon].caliber, Loadout.WEAPONS[c.weapon].kind], func(): _go("weapons"), 26)
-	_section(left, "GUNSMITH")
-	for slot in Loadout.SLOTS:
-		_btn(left, "%s:   %s" % [SLOT_NAMES[slot], Loadout.attachment(slot, c[slot]).name], func(): _go("gunsmith", slot), 19)
-	_section(left, "CAMO")
-	_btn(left, Loadout.camo(c.camo).name, func(): _go("camo"), 19)
+	_section(left, "GUN")
+	_btn(left, "%s\n%s  ·  %s" % [Loadout.weapon(c.weapon).name, Loadout.weapon(c.weapon).caliber, Loadout.weapon(c.weapon).kind], func(): _go("weapons"), 26)
+	if not Loadout.slots_for(c.category).is_empty():
+		_section(left, "GUNSMITH")
+		for slot in Loadout.slots_for(c.category):
+			_btn(left, "%s:   %s" % [SLOT_NAMES[slot], Loadout.attachment(slot, c[slot]).name], func(): _go("gunsmith", slot), 19)
+	if c.category == "pistol": # (camos paint the Glock's texture; the long guns keep their own finish)
+		_section(left, "CAMO")
+		_btn(left, Loadout.camo(c.camo).name, func(): _go("camo"), 19)
 	_section(left, "PERKS")
 	for p in Loadout.PERKS.size():
 		_btn(left, "PERK %d:   %s" % [p + 1, Loadout.perk(p, c.perks[p]).name], func(): _go("perks", p), 19)
 	_spacer(left, 12)
 	var equipped := _edit == Loadout.active
-	var eq := _btn(left, "EQUIPPED" if equipped else "EQUIP CLASS", func():
+	var eq := _btn(left, "EQUIPPED" if equipped else "EQUIP LOADOUT", func():
 		if Loadout.active != _edit:
 			Loadout.active = _edit
 			_dirty = true
@@ -333,7 +349,7 @@ func _page_class() -> void:
 
 func _page_weapons() -> void:
 	var c: Dictionary = Loadout.classes[_edit]
-	_header("SIDEARM", "LOADOUT  /  " + c.name)
+	_header("GUN", "LOADOUT  /  " + c.name)
 	var body := _body()
 	var grid := GridContainer.new()
 	grid.columns = 2
@@ -342,9 +358,9 @@ func _page_weapons() -> void:
 	body.add_child(grid)
 	var right := _col(body, 520)
 	_stats_panel(right, c)
-	var ids := Loadout.WEAPONS.keys()
+	var ids := Loadout.guns_in(c.category)
 	for id in ids:
-		var w: Dictionary = Loadout.WEAPONS[id]
+		var w: Dictionary = Loadout.weapon(id)
 		var card := Button.new()
 		card.custom_minimum_size = Vector2(330, 210)
 		card.focus_mode = Control.FOCUS_ALL
@@ -375,13 +391,13 @@ func _page_weapons() -> void:
 
 func _page_gunsmith(slot: String) -> void:
 	var c: Dictionary = Loadout.classes[_edit]
-	_header("GUNSMITH", "LOADOUT  /  %s  /  %s" % [c.name, Loadout.WEAPONS[c.weapon].name])
+	_header("GUNSMITH", "LOADOUT  /  %s  /  %s" % [c.name, Loadout.weapon(c.weapon).name])
 	# slot tabs across the top
 	var tabs := HBoxContainer.new()
 	tabs.position = Vector2(64, 132)
 	tabs.add_theme_constant_override("separation", 6)
 	_page.add_child(tabs)
-	for s in Loadout.SLOTS:
+	for s in Loadout.slots_for(c.category):
 		var t := Button.new()
 		t.text = SLOT_NAMES[s]
 		t.focus_mode = Control.FOCUS_NONE # Q/E-style tabs: click them (controller: back out and pick the slot)
@@ -398,7 +414,7 @@ func _page_gunsmith(slot: String) -> void:
 	var right := _col(body, 640)
 	_preview(right, Vector2(640, 330), c)
 	_stats_panel(right, c)
-	for a in Loadout.ATTACHMENTS[slot]:
+	for a in Loadout.options(c.category, slot):
 		var on: bool = c[slot] == a.id
 		var b := _btn(left, a.name + ("      ✓" if on else ""), func():
 			c[slot] = a.id
@@ -420,7 +436,7 @@ func _page_gunsmith(slot: String) -> void:
 
 func _page_camo() -> void:
 	var c: Dictionary = Loadout.classes[_edit]
-	_header("CAMO", "LOADOUT  /  %s  /  %s" % [c.name, Loadout.WEAPONS[c.weapon].name])
+	_header("CAMO", "LOADOUT  /  %s  /  %s" % [c.name, Loadout.weapon(c.weapon).name])
 	var body := _body()
 	var grid := GridContainer.new()
 	grid.columns = 4
@@ -518,7 +534,8 @@ func _page_settings() -> void:
 # ---------------------------------------------------------------- pieces
 
 func _changed() -> void:
-	if _edit == Loadout.active:
+	# re-equip on resume if this is the loadout in use (the equipped one, or this round's category)
+	if _edit == Loadout.active or (player and Loadout.classes[_edit].category == player.gun_kind):
 		_dirty = true
 	Loadout.save_all()
 
@@ -737,6 +754,20 @@ func _preview(parent: Control, box: Vector2, c: Dictionary) -> void:
 	_preview_pivot = Node3D.new()
 	_preview_pivot.position = center
 	vp.add_child(_preview_pivot)
+	if c.category != "pistol":
+		# a long gun: its own model, shrunk to fit the frame the Glock is framed for
+		var kind: String = c.category
+		var gun := Node3D.new()
+		Guns.add_model(gun, kind)
+		var mi: MeshInstance3D = gun.get_child(0)
+		var a: AABB = mi.mesh.get_aabb()
+		var fit := 0.26 / maxf(maxf(a.size.z, a.size.y), 0.01)
+		gun.scale = Vector3.ONE * fit
+		gun.position = -a.get_center() * fit
+		_preview_pivot.add_child(gun)
+		_preview_gun = gun
+		_dress_preview(c)
+		return
 	_preview_gun = Pistol.make(false)
 	_preview_gun.position = -center
 	_preview_pivot.add_child(_preview_gun)
@@ -746,10 +777,16 @@ func _preview(parent: Control, box: Vector2, c: Dictionary) -> void:
 func _dress_preview(c: Dictionary) -> void:
 	if not is_instance_valid(_preview_gun):
 		return
-	var parts := {}
-	for slot in Loadout.SLOTS:
-		parts[slot] = c[slot]
-	Pistol.dress(_preview_gun, Loadout.camo(c.camo), parts)
+	if c.category != "pistol":
+		Guns.dress(_preview_gun, c)
+	else:
+		var parts := {}
+		for slot in Loadout.SLOTS:
+			parts[slot] = c[slot]
+		Pistol.dress(_preview_gun, Loadout.camo(c.camo), parts)
+	for n in _preview_gun.find_children("*", "MeshInstance3D", true, false):
+		if n.has_meta("beam"):
+			n.visible = false # (the laser's beam only shows in the game, out to what it hits)
 
 
 func _box(bg: Color, accent_w: int, pad_top := 10) -> StyleBoxFlat:

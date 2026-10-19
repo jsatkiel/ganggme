@@ -3,7 +3,7 @@ extends SceneTree
 
 
 func _init() -> void:
-	for path in ["res://assets/characters/Superhero_Male_FullBody.gltf", "res://assets/characters/UAL1_Standard.glb", "res://assets/characters/Hair_Buzzed.gltf", "res://assets/cars/sedan.glb", "res://assets/nature/tree_oak_dark.glb"]:
+	for path in ["res://assets/characters/Superhero_Male_FullBody.gltf", "res://assets/characters/UAL1_Standard.glb", "res://assets/characters/Hair_Buzzed.gltf", "res://assets/nature/tree_oak_dark.glb"]:
 		var scene: PackedScene = load(path)
 		if scene == null:
 			print("FAILED ", path)

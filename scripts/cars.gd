@@ -10,14 +10,12 @@ const OPP_PAINTS := [
 	Color(0.05, 0.05, 0.055), Color(0.55, 0.56, 0.58), Color(0.8, 0.8, 0.78), Color(0.32, 0.05, 0.06),
 	Color(0.08, 0.12, 0.26), Color(0.16, 0.22, 0.17), Color(0.3, 0.28, 0.25), Color(0.4, 0.33, 0.24),
 ]
-const CITY_COLORS := ["Black", "Blue", "Brown", "IceBlue", "OliveGreen", "Red", "White"]
 
-# file, real length (m), paint: "body:<material>" recolors that material, "city" swaps the color
-# texture, "keep" leaves the model's own look. tex: texture set to apply to every surface.
+# file, real length (m), paint: "body:<material>" recolors that material, "keep" leaves the model's own look.
+# tex: texture set to apply to every surface.
 const MODELS := {
 	"hatchback": {"file": "hatchback/hatchback.glb", "length": 4.25, "paint": "body:carpaint"},
 	"si5": {"file": "si5/si5LOD0.fbx", "length": 4.5, "paint": "body:Car Paint", "hide": "logos"},
-	"citycar": {"file": "citycar03/CityCar03.fbx", "length": 5.2, "paint": "city"},
 	"carfree02": {"file": "carfree02/Car_Free_02.fbx", "length": 4.9, "paint": "keep", "tex": "carfree02"},
 	"van": {"file": "van/van.obj", "length": 5.4, "paint": "keep"},
 }
@@ -136,17 +134,6 @@ static func _paint(model: Node3D, how: String, rng: RandomNumberGenerator) -> vo
 						m.albedo_color = Color(0.08, 0.08, 0.085) # trim, grille
 						m.roughness = 0.7
 				mi.set_surface_override_material(s, m)
-	elif how == "city":
-		var tex: Texture2D = load(DIR + "citycar03/Textures/RCA1_Color_%s.png" % CITY_COLORS[rng.randi() % CITY_COLORS.size()])
-		for mi in _meshes(model):
-			for s in mi.mesh.get_surface_count():
-				var src: Material = mi.mesh.surface_get_material(s)
-				if src is BaseMaterial3D and src.resource_name == "RCA1":
-					var m: BaseMaterial3D = src.duplicate()
-					m.albedo_texture = tex
-					m.albedo_color = Color(0.62, 0.6, 0.58) # sun-faded, dusty: the palette colors are toy-bright
-					m.roughness = 0.7
-					mi.set_surface_override_material(s, m)
 
 
 static func _tex_material(set_name: String) -> StandardMaterial3D:
@@ -154,18 +141,8 @@ static func _tex_material(set_name: String) -> StandardMaterial3D:
 	if _tex_mats.has(set_name):
 		return _tex_mats[set_name]
 	var m := StandardMaterial3D.new()
-	if set_name == "redcar":
-		var t := DIR + "redcar/textures/bake_LP_%s.png"
-		m.albedo_texture = load(t % "albedo")
-		m.metallic = 1.0
-		m.metallic_texture = load(t % "metalness")
-		m.roughness = 1.0
-		m.roughness_texture = load(t % "roughness")
-		m.normal_enabled = true
-		m.normal_texture = load(t % "normal")
-	else:
-		m.albedo_texture = load(DIR + "carfree02/Car_Free_02_Texture.png")
-		m.roughness = 0.6
+	m.albedo_texture = load(DIR + "carfree02/Car_Free_02_Texture.png")
+	m.roughness = 0.6
 	_tex_mats[set_name] = m
 	return m
 

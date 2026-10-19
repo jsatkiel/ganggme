@@ -6,6 +6,7 @@ const Sfx = preload("res://scripts/sfx.gd")
 const CrewModel = preload("res://scripts/crew_model.gd")
 const Pistol = preload("res://scripts/pistol.gd")
 const Guns = preload("res://scripts/guns.gd")
+const Loadout = preload("res://scripts/loadout.gd")
 
 const SPEED := 4.2
 const STRAFE_SPEED := 2.6
@@ -30,6 +31,10 @@ var has_waypoint := false
 var last_known := Vector3.ZERO
 var has_last_known := false
 var stuck_t := 0.0
+var fight_stuck_t := 0.0 # how long a bot in a fight has been pushing into something
+var detour := Vector3.ZERO # while detour_t runs: the way round it
+var detour_t := 0.0
+var detour_age := 99.0 # time since the last detour: blocked again soon after, it keeps going the same way
 var think_t := 0.0
 var sees_player := false
 var react_t := 0.0
@@ -64,7 +69,7 @@ func _ready() -> void:
 	shot_audio.unit_size = 6.0 # full volume up close, fading with distance
 	shot_audio.max_distance = 220.0
 	shot_audio.attenuation_filter_cutoff_hz = 9000.0 # far shots sound duller
-	shot_audio.volume_db = 2.0
+	shot_audio.volume_db = -4.0 # (6 dB under your own gun at the same spot)
 	shot_audio.max_polyphony = 4
 	shot_audio.position.y = 1.3
 	add_child(shot_audio)
@@ -146,6 +151,10 @@ func _physics_process(delta: float) -> void:
 			move += to_h.normalized() * SPEED * 0.75
 		elif to_p.length() > gun.bot_range:
 			move += to_p.normalized() * SPEED * 0.7
+		if detour_t > 0.0:
+			# blocked (a parked car, a stoop): go round it for a moment, still shooting
+			detour_t -= delta
+			move = detour * SPEED * 0.85
 		react_t -= delta
 		if react_t <= 0.0 and fire_cd <= 0.0:
 			_fire(p)
@@ -174,6 +183,24 @@ func _physics_process(delta: float) -> void:
 	move_and_slide()
 
 	var hspeed := Vector2(velocity.x, velocity.z).length()
+	if sees_player and detour_t <= 0.0:
+		# in a fight it pushes straight at the circle or its target, which can be into a car: when it's
+		# getting nowhere, pick the side along whatever it hit that heads more its way, and walk that way a bit
+		var blocked := get_slide_collision_count() > 0 and move.length() > 1.5 and hspeed < move.length() * 0.45
+		detour_age += delta
+		fight_stuck_t = fight_stuck_t + delta if blocked else 0.0
+		if fight_stuck_t > 0.3:
+			var n := Vector3.ZERO
+			for i in get_slide_collision_count():
+				n += get_slide_collision(i).get_normal()
+			n.y = 0.0
+			if n.length() > 0.01:
+				var along := n.normalized().cross(Vector3.UP)
+				var ref := detour if detour_age < 2.0 else move
+				detour = along if along.dot(ref) >= 0.0 else -along
+				detour_age = 0.0
+				detour_t = randf_range(0.8, 1.3)
+			fight_stuck_t = 0.0
 	if move.length() > 0.5 and hspeed < 0.6:
 		stuck_t += delta
 		if has_last_known and stuck_t > 1.2:
@@ -295,7 +322,10 @@ func _fire(p: Node3D) -> void:
 		chance -= 0.1
 	chance = clampf(chance, 0.06, maxf(0.55, gun.bot_accuracy))
 	var hit := randf() < chance # (no tracer lines: the user cut them)
-	shot_audio.pitch_scale = randf_range(0.9, 1.05) * gun.sound_pitch
+	# the sound of the gun fired, as heard from the camera: close-up or far (Loadout.shot_sound)
+	var cam := get_viewport().get_camera_3d()
+	shot_audio.stream = Loadout.shot_sound(Loadout.guns_in(gun_kind)[0], global_position.distance_to(cam.global_position) if cam else 99.0)
+	shot_audio.pitch_scale = randf_range(0.95, 1.05) * gun.sound_pitch
 	shot_audio.play()
 	if flash:
 		flash.fire()

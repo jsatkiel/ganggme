@@ -146,11 +146,16 @@ class SupportHand extends SkeletonModifier3D:
 	var palm_local := Vector3.ZERO
 	var reach := 0.0 # wrist to the middle of the palm
 	var thick := 0.0 # palm surface to the bone
+	var curl: Array[int] = [] # finger bones, knuckle to tip per finger, bent round the gun
+	const CURL := [0.9, 1.1, 0.8] # bend at each finger joint (radians)
+	var reach_out := false # first person: the shoulder moves up so the hand reaches the gun's front
+	const FOREARM := Vector3(0.35, 0.45, 0.75) # first person: elbow to wrist, in the gun's right/up/forward
 
-	func setup(sk: Skeleton3D, bones: Array, down: Vector3) -> void:
+	func setup(sk: Skeleton3D, bones: Array, down: Vector3, fingers: Array = []) -> void:
 		upper = bones[0]
 		lower = bones[1]
 		hand = bones[2]
+		curl.assign(fingers) # (-1 for a bone the rig lacks: skipped)
 		# rest is a T-pose, palms down
 		var rest := sk.get_bone_global_rest(hand)
 		var knuckle: Vector3 = sk.get_bone_global_rest(bones[3]).origin - rest.origin
@@ -171,15 +176,47 @@ class SupportHand extends SkeletonModifier3D:
 		var up := g.basis.y.normalized()
 		var back := g.basis.z.normalized()
 		var fingers := (right * 0.75 + up * 0.15 - back * 0.6).normalized()
-		var palm := (up - fingers * fingers.dot(up)).normalized()
+		var cup := up + right * 0.6 # the palm faces up and in against the gun's left side, the thumb along it
+		var palm := (cup - fingers * fingers.dot(cup)).normalized()
 		var wrist := g * point - fingers * reach - palm * thick
-		var pole := (-right * 0.6 - up + back * 0.2).normalized()
-		# two-bone reach: shoulder and elbow turn so the wrist lands on the spot, the elbow bending toward the pole
 		var a := sk.get_bone_global_pose(upper).origin
+		if reach_out:
+			# first person: the aim pose holds a long gun's front further out than the arm reaches. Lay the
+			# forearm along the gun, coming up from below and behind (the elbow off screen), and bring the
+			# unseen shoulder to it
+			var e := sk.get_bone_global_pose(lower).origin
+			var l1 := a.distance_to(e)
+			var l2 := e.distance_to(sk.get_bone_global_pose(hand).origin)
+			var elbow := wrist - (-back * FOREARM.z + up * FOREARM.y + right * FOREARM.x).normalized() * l2
+			var shoulder := elbow + (a - elbow).normalized() * l1
+			sk.set_bone_pose_position(upper, sk.get_bone_global_pose(sk.get_bone_parent(upper)).affine_inverse() * shoulder)
+			_turn(sk, upper, e - a, elbow - shoulder)
+			var lo := sk.get_bone_global_pose(lower).origin
+			_turn(sk, lower, sk.get_bone_global_pose(hand).origin - lo, wrist - lo)
+		else:
+			_reach(sk, a, wrist - a, wrist, right, up, back)
+		# the hand itself: knuckles and palm as worked out above
+		var have := Basis(fingers_local, palm_local, fingers_local.cross(palm_local)).orthonormalized()
+		var want := Basis(fingers, palm, fingers.cross(palm)).orthonormalized()
+		var parent := sk.get_bone_global_pose(lower).basis.orthonormalized()
+		sk.set_bone_pose_rotation(hand, (parent.inverse() * want * have.inverse()).get_rotation_quaternion())
+		# the fingers wrap round the handguard: each joint bends from its rest toward the palm (knuckles first)
+		var axis := fingers.cross(palm).normalized()
+		for i in curl.size():
+			var f := curl[i]
+			if f < 0:
+				continue
+			var r := sk.get_bone_rest(f).basis.get_rotation_quaternion()
+			var frame := sk.get_bone_global_pose(sk.get_bone_parent(f)).basis.orthonormalized() * Basis(r)
+			var local_axis := (frame.inverse() * axis).normalized()
+			sk.set_bone_pose_rotation(f, r * Quaternion(local_axis, CURL[i % 3]))
+
+	func _reach(sk: Skeleton3D, a: Vector3, to: Vector3, wrist: Vector3, right: Vector3, up: Vector3, back: Vector3) -> void:
+		# two-bone reach: shoulder and elbow turn so the wrist lands on the spot, the elbow bending toward the pole
+		var pole := (-right * 0.6 - up + back * 0.2).normalized()
 		var b := sk.get_bone_global_pose(lower).origin
 		var l1 := a.distance_to(b)
 		var l2 := b.distance_to(sk.get_bone_global_pose(hand).origin)
-		var to := wrist - a
 		var d := clampf(to.length(), absf(l1 - l2) + 0.001 * l1, (l1 + l2) * 0.999)
 		var dir := to.normalized()
 		var cos_a := clampf((l1 * l1 + d * d - l2 * l2) / (2.0 * l1 * d), -1.0, 1.0)
@@ -188,11 +225,6 @@ class SupportHand extends SkeletonModifier3D:
 		_turn(sk, upper, b - a, elbow - a)
 		var w := sk.get_bone_global_pose(hand).origin
 		_turn(sk, lower, w - elbow, wrist - elbow)
-		# the hand itself: knuckles and palm as worked out above
-		var have := Basis(fingers_local, palm_local, fingers_local.cross(palm_local)).orthonormalized()
-		var want := Basis(fingers, palm, fingers.cross(palm)).orthonormalized()
-		var parent := sk.get_bone_global_pose(lower).basis.orthonormalized()
-		sk.set_bone_pose_rotation(hand, (parent.inverse() * want * have.inverse()).get_rotation_quaternion())
 
 	func _turn(sk: Skeleton3D, bone: int, from: Vector3, to: Vector3) -> void:
 		# swing a bone (in the skeleton's space) so that `from` points along `to`
@@ -214,6 +246,7 @@ var twist: SpineTwist
 var retarget: Retarget
 var support: SupportHand # two-handed guns: the left hand on the front of the gun
 var left_arm: Array[Node3D] = [] # first person: the left hand and sleeve, drawn only for two-handed guns
+var right_hand: Array[Node3D] = [] # first person: the right hand and sleeve, hidden for two-handed guns
 var _awake := true
 var _two_hands := false
 var _dead := false # playing the death fall (on the AnimationPlayer, not the tree)
@@ -366,6 +399,7 @@ func _dress_male(mi: MeshInstance3D) -> void:
 	mi.mesh = _male_bodies[first_person]
 	mi.material_override = _male_mat
 	if first_person:
+		right_hand.append(mi)
 		var left := MeshInstance3D.new()
 		left.name = "LeftHand"
 		left.mesh = _male_bodies["left_hand"]
@@ -388,7 +422,9 @@ static func _sleeve(hoodie: Mesh, skin: Skin, side: String) -> ArrayMesh:
 		var arm := []
 		for i in skin.get_bind_count():
 			var crew := RigMap.to_crew(String(skin.get_bind_name(i)))
-			arm.append(crew == "lowerarm" + side) # (the bit of cuff that follows the hand swings over the knuckles when the wrist bends)
+			# (the bit of cuff that follows the hand swings over the knuckles when the wrist bends). The left arm
+			# reaches out to the rifle's front with its elbow in view: it keeps the upper sleeve too
+			arm.append(crew == "lowerarm" + side or (side == "_l" and crew == "upperarm_l"))
 		var show := PackedByteArray()
 		show.resize(n)
 		for k in n:
@@ -658,9 +694,11 @@ func flinch() -> void:
 
 
 func show_gun(kind: String) -> void:
-	# this round's gun in the hand (guns.gd); the AK and RICKY bring the left hand up to hold the front
+	# this round's gun in the hand (guns.gd); the DRAKO brings the left hand up to wrap the handguard
 	Guns.show(gun, kind, false) # (no gun shadows: a lot of guns on a weak GPU, too small to miss)
 	_two_hands = Guns.SUPPORT.has(kind)
+	for n in right_hand:
+		n.visible = not _two_hands
 	for n in left_arm:
 		n.visible = _two_hands
 	if _two_hands and support == null:
@@ -672,11 +710,16 @@ func show_gun(kind: String) -> void:
 		if bones.has(-1):
 			support = null
 			return
-		support.setup(skeleton, bones, (_skel_from_model(skeleton).basis.inverse() * Vector3.DOWN).normalized())
+		var fingers := []
+		for f in ["index", "middle", "ring", "pinky"]:
+			for j in ["_01_l", "_02_l", "_03_l"]:
+				fingers.append(bone(f + j))
+		support.setup(skeleton, bones, (_skel_from_model(skeleton).basis.inverse() * Vector3.DOWN).normalized(), fingers)
+		support.reach_out = first_person
 		skeleton.add_child(support)
 	if support:
 		skeleton.move_child(support, -1) # after the pose copy and the spine twist
-		support.point = Guns.SUPPORT.get(kind, Vector3.ZERO)
+		support.point = Guns.SUPPORT.get(kind, Vector3.ZERO) - Guns.HAND_SHIFT.get(kind, Vector3.ZERO)
 		support.active = _two_hands and _awake
 
 
@@ -740,6 +783,7 @@ func _wear_garments() -> void:
 		var hoodie: Mesh = mi.mesh
 		if first_person:
 			mi.mesh = _sleeve(hoodie, mi.skin, "_r")
+			right_hand.append(mi)
 		mi.material_override = mats.get(g, shoe)
 		skeleton.add_child(mi)
 		mi.skeleton = NodePath("..")

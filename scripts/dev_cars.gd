@@ -1,6 +1,6 @@
 extends SceneTree
 ## Dev: prints the size and materials of every car model in assets/cars2.
-const CARS := ["hatchback/hatchback.glb", "redcar/RedCar.fbx", "muscle/MUSCLE_CAR.fbx", "si5/si5LOD0.fbx", "bentley/Bentley_Mulsanne.obj", "sedan_obj/car.obj", "citycar03/CityCar03.fbx", "carfree02/Car_Free_02.fbx", "van/van.obj"]
+const CARS := ["hatchback/hatchback.glb", "si5/si5LOD0.fbx", "carfree02/Car_Free_02.fbx", "van/van.obj"]
 func _init() -> void:
 	for c in CARS:
 		var res = load("res://assets/cars2/" + c)

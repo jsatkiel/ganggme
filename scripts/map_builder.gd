@@ -11,12 +11,6 @@ extends Node3D
 
 const FLOOR_H := 3.1
 const ROAD_Y := -0.15 # the street, gate road and parking lot sit one curb (15 cm) below the sidewalks and lawns
-const CAR_MODELS := [
-	preload("res://assets/cars/sedan.glb"), preload("res://assets/cars/sedan-sports.glb"), preload("res://assets/cars/suv.glb"),
-	preload("res://assets/cars/suv-luxury.glb"), preload("res://assets/cars/hatchback-sports.glb"), preload("res://assets/cars/van.glb"),
-	preload("res://assets/cars/sedan.glb"), preload("res://assets/cars/suv.glb"),
-]
-const CAR_PAINT := preload("res://scripts/car_paint.gdshader")
 const Cars := preload("res://scripts/cars.gd")
 const LiteMesh := preload("res://scripts/lite_mesh.gd")
 const COVERED_CAR := preload("res://assets/props/covered_car/covered_car.gltf")
@@ -28,10 +22,6 @@ const HYDRANT := preload("res://assets/props/fire_hydrant/fire_hydrant.gltf")
 const BOX := preload("res://assets/props/cardboard_box_01/cardboard_box_01.gltf")
 const SECURITY_BOOTH := preload("res://assets/props/security_booth/security_booth.fbx")
 const BOOTH_SCALE := 10.4
-const CAR_COLORS := [
-	Color(0.45, 0.06, 0.07), Color(0.62, 0.63, 0.65), Color(0.07, 0.07, 0.08),
-	Color(0.85, 0.85, 0.83), Color(0.1, 0.14, 0.3), Color(0.2, 0.28, 0.22), Color(0.35, 0.33, 0.3),
-]
 # wall graffiti, painted by tools/bake_graffiti.gd into assets/graffiti (keep the names in step with it)
 const GRAFFITI := ["southside", "block", "twin", "opps", "64th_st", "no_lackin", "long_live", "keep_out", "rip", "stay_down"]
 const GRAFFITI_THROWS := ["southside", "block", "twin", "opps"] # bubbly throw-ups; the rest are handstyle tags
@@ -53,7 +43,6 @@ var _blocked: Array = [] # [center: Vector2, half_size: Vector2, yaw: float]
 var _boards: Array[Transform3D] = []
 var _pickets: Array[Transform3D] = []
 var _posts: Array[Transform3D] = []
-var _car_mats := {}
 
 var m_concrete: StandardMaterial3D
 var m_sidewalk: StandardMaterial3D
@@ -1192,29 +1181,6 @@ func _grimy(src: Material) -> Material:
 	_grimy_cache[src] = m
 	return m
 
-
-var _paint_cache := {}
-var _grime_noise: NoiseTexture2D
-
-
-func _car_paint(color: Color, dirt: float) -> ShaderMaterial:
-	var key := "%s_%d" % [color.to_html(), int(dirt * 4.0)]
-	if _paint_cache.has(key):
-		return _paint_cache[key]
-	if _grime_noise == null:
-		_grime_noise = NoiseTexture2D.new()
-		_grime_noise.seamless = true
-		var fn := FastNoiseLite.new()
-		fn.frequency = 0.02
-		_grime_noise.noise = fn
-	var m := ShaderMaterial.new()
-	m.shader = CAR_PAINT
-	m.set_shader_parameter("colormap", load("res://assets/cars/Textures/colormap.png"))
-	m.set_shader_parameter("paint", color)
-	m.set_shader_parameter("dirt", int(dirt * 4.0) / 4.0)
-	m.set_shader_parameter("grime_tex", _grime_noise)
-	_paint_cache[key] = m
-	return m
 
 
 # ---------------------------------------------------------------- dead trees

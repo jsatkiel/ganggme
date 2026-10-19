@@ -5,7 +5,6 @@ extends Node3D
 ## the next gun each round (guns.gd), so in any 4 rounds everyone uses all four.
 
 const InputSetup = preload("res://scripts/input_setup.gd")
-const MapBuilder = preload("res://scripts/map_builder.gd")
 const PlayerScript = preload("res://scripts/player.gd")
 const BotScript = preload("res://scripts/bot.gd")
 const HudScript = preload("res://scripts/hud.gd")
@@ -13,6 +12,9 @@ const PauseMenu = preload("res://scripts/pause_menu.gd")
 const Loadout = preload("res://scripts/loadout.gd")
 const Guns = preload("res://scripts/guns.gd")
 const MODES := {"koth": "KING OF THE HOOD", "tdm": "TEAM DEATHMATCH"}
+# the maps: only the picked one's script (and so its art) is loaded. Both modes play on every map; a map
+# other than the projects says where its circle and the two sides' starting spots are (koth_hill, koth_bases)
+const MAPS := {"projects": ["res://scripts/map_builder.gd", "THE PROJECTS"], "brownstone": ["res://scripts/brownstone_map.gd", "BROWNSTONE BLOCK"]}
 
 const BOT_COUNT := 6 # opps
 const TEAMMATES := 1 # bots on your crew
@@ -26,10 +28,10 @@ const BOT_RESPAWN := 4.0
 var koth_team := 8
 const ROUNDS_TO_WIN := 4 # best of 7
 const HOLD_TIME := 5.0 # seconds on the circle in a row, with none of the other team on it
-const HILL := Vector3(0, 0.0, -7) # the grass island in the very middle of the parking lot
+var hill_at := Vector3(0, 0.0, -7) # the projects: the grass island in the very middle of the parking lot
 const HILL_RADIUS := 4.5
-const CREW_BASE := Vector3(0, 0.2, 48) # both 55 m from the circle, on opposite sides (south by the gate, north)
-const OPP_BASE := Vector3(0, 0.2, -62)
+var crew_base := Vector3(0, 0.2, 48) # both 55 m from the circle, on opposite sides (south by the gate, north)
+var opp_base := Vector3(0, 0.2, -62)
 const ROUND_BREAK := 4.0
 
 # auto quality: frame cost swings with the view (the 940MX holds 60 looking down the street but not
@@ -53,6 +55,7 @@ var kills := 0
 var deaths := 0
 var match_over := false
 var mode: String = "koth"
+var map_id := "projects"
 var round_num := 0
 var round_wins := [0, 0] # [your crew, opps]
 var round_live := false
@@ -78,13 +81,24 @@ func _ready() -> void:
 	mode = Loadout.settings.get("mode", "koth")
 	if not MODES.has(mode):
 		mode = "koth"
+	map_id = Loadout.settings.get("map", "projects")
+	if "--map" in OS.get_cmdline_user_args(): # dev: play this map (doesn't change the saved pick)
+		map_id = OS.get_cmdline_user_args()[OS.get_cmdline_user_args().find("--map") + 1]
+	if not MAPS.has(map_id):
+		map_id = "projects"
 	var koth := mode == "koth"
 	koth_team = 8 if Loadout.settings.get("big_teams", true) else 4
 	_build_environment()
-	map = MapBuilder.new()
+	map = load(MAPS[map_id][0]).new()
 	map.name = "Map"
 	add_child(map)
 	map.build()
+	if map.has_method("tune_environment"):
+		map.tune_environment(env, sun)
+	if "koth_hill" in map:
+		hill_at = map.koth_hill
+		crew_base = map.koth_bases[0]
+		opp_base = map.koth_bases[1]
 
 	hud = HudScript.new()
 	add_child(hud)
@@ -263,7 +277,7 @@ func _process(delta: float) -> void:
 
 func _base_slots(team: int) -> Array:
 	# the spots a side starts in: a tight group, rows of 4, at its end of the map
-	var c: Vector3 = CREW_BASE if team == 0 else OPP_BASE
+	var c: Vector3 = crew_base if team == 0 else opp_base
 	var out := []
 	for i in koth_team:
 		var p := c + Vector3((i % 4 - 1.5) * 1.8, 0, (floori(i / 4.0) - 0.5) * 1.8)
@@ -278,7 +292,7 @@ func _build_hill() -> void:
 	hill_node = Node3D.new()
 	hill_node.name = "Hill"
 	add_child(hill_node)
-	hill_node.global_position = HILL + Vector3(0, 0.035, 0)
+	hill_node.global_position = hill_at + Vector3(0, 0.035, 0)
 	_hill_mat = StandardMaterial3D.new()
 	_hill_mat.shading_mode = BaseMaterial3D.SHADING_MODE_UNSHADED
 	_hill_mat.transparency = BaseMaterial3D.TRANSPARENCY_ALPHA
@@ -321,12 +335,12 @@ func _build_hill() -> void:
 
 func hill_target() -> Vector3:
 	# where the bots should be heading (Vector3.INF: no circle in this mode)
-	return HILL if mode == "koth" else Vector3.INF
+	return hill_at if mode == "koth" else Vector3.INF
 
 
 func _on_hill(n: Node3D) -> bool:
-	var d := Vector2(n.global_position.x - HILL.x, n.global_position.z - HILL.z)
-	return d.length() < HILL_RADIUS and absf(n.global_position.y - HILL.y) < 2.5
+	var d := Vector2(n.global_position.x - hill_at.x, n.global_position.z - hill_at.z)
+	return d.length() < HILL_RADIUS and absf(n.global_position.y - hill_at.y) < 2.5
 
 
 func _koth_tick(delta: float) -> void:
@@ -393,7 +407,7 @@ func _start_round() -> void:
 	hud.update_rounds(round_num, round_wins[0], round_wins[1], ROUNDS_TO_WIN)
 	hud.center_message("ROUND %d
 TAKE THE CIRCLE
-YOU'VE GOT THE %s" % [round_num, Guns.STATS[player.gun_kind].name if player.gun_kind != "pistol" else "PISTOL"], 3.0)
+YOU'VE GOT THE %s" % [round_num, player.weapon_name], 3.0)
 	round_live = true
 
 
@@ -447,8 +461,10 @@ func _set_quality(level: int) -> void:
 
 func _facing_center(pos: Vector3) -> float:
 	if mode == "koth":
-		var h := HILL - pos
+		var h := hill_at - pos
 		return atan2(-h.x, -h.z)
+	if map.has_method("spawn_facing"):
+		return map.spawn_facing(pos)
 	var d := (Vector3(0, 0, 40) if pos.z > 62.0 else Vector3(0, 0, -10)) - pos
 	return atan2(-d.x, -d.z)
 
@@ -578,8 +594,22 @@ func _take_screenshot(args: PackedStringArray) -> void:
 		c.look_at(Vector3(v[3], v[4], v[5]))
 		c.make_current()
 		hud.visible = false
+	if "--menu" in args:
+		# dev: --menu page[,loadout index]: open the pause menu on that page (loadout, class, weapons, gunsmith)
+		var m: Array = Array(args[args.find("--menu") + 1].split(","))
+		var menu: Node = find_children("*", "CanvasLayer", false, false).filter(func(n): return n.has_method("open"))[0]
+		await get_tree().create_timer(1.0).timeout
+		menu.open()
+		if m.size() > 1:
+			menu._edit = int(m[1])
+		if m[0] != "main":
+			menu._go(m[0], (m[2] if m.size() > 2 else "muzzle") if m[0] == "gunsmith" else null)
 	if "--ads" in args:
 		player.force_ads = true
+	if "--zoom" in args:
+		# dev: --zoom fov: narrow the view (the view model stays where it is: a close-up of part of the screen)
+		player.hip_fov = float(args[args.find("--zoom") + 1])
+		hud.visible = false
 	if "--fp-side" in args:
 		# dev: look at the first-person arms from the side
 		await get_tree().create_timer(1.0).timeout
@@ -589,6 +619,9 @@ func _take_screenshot(args: PackedStringArray) -> void:
 		var gp: Vector3 = player.arms.gun.global_position
 		var cb: Basis = player.camera.global_transform.basis
 		sc.global_position = gp + cb.x * (-0.28 if "--fp-left" in args else 0.28) + cb.y * 0.04 + cb.z * 0.02 # --fp-left: from the thumb side
+		if "--fp-at" in args: # --fp-at x,y,z: the camera's offset from the gun, in the view's own axes
+			var o := args[args.find("--fp-at") + 1].split_floats(",")
+			sc.global_position = gp + cb.x * o[0] + cb.y * o[1] + cb.z * o[2]
 		sc.look_at(gp)
 		sc.make_current()
 		hud.visible = false
